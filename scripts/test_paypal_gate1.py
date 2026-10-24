@@ -459,7 +459,7 @@ def main():
             )
             sys.exit(1)
 
-        # Step 2: Check for existing un-reconciled batch or new submission
+        # Step 2: Check for existing un-reconciled batch or recovery
         should_reconcile = args.reconcile
         if state and state.get("payout_batch_id") and not args.force_new:
             if state.get("last_item_status") == "SUCCESS":
@@ -523,9 +523,16 @@ def main():
                 )
                 sys.exit(1)
 
-        # Step 3: Fresh Submission
-        sender_batch_id = f"vt_gate1_{uuid.uuid4().hex[:12]}"
-        sender_item_id = f"item_{uuid.uuid4().hex[:8]}"
+        # Step 3: Submission / Idempotent Recovery
+        # If a previous submission attempt occurred with a sender_batch_id but payout_batch_id was missing (e.g. timeout),
+        # reuse the exact same sender_batch_id and sender_item_id to uphold idempotency.
+        if state and state.get("sender_batch_id") and not state.get("payout_batch_id") and not args.force_new:
+            print(f"[i] Recovering previously generated batch ID {state['sender_batch_id']} to preserve idempotency...")
+            sender_batch_id = state["sender_batch_id"]
+            sender_item_id = state.get("sender_item_id", f"item_{uuid.uuid4().hex[:8]}")
+        else:
+            sender_batch_id = f"vt_gate1_{uuid.uuid4().hex[:12]}"
+            sender_item_id = f"item_{uuid.uuid4().hex[:8]}"
 
         # Persist intent BEFORE network submission
         state = {
