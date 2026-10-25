@@ -273,7 +273,7 @@ def extract_candidate_payee_change(
         return fallback
 
     # Attempt Gemini API inference with configured or default model
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    model_name = (os.getenv("GEMINI_MODEL") or "gemini-3-flash-preview").strip()
     try:
         import httpx
 
