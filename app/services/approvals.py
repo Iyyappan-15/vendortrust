@@ -86,6 +86,15 @@ def approve_payee_change_case(
     if not case:
         raise ValueError(f"PayeeChangeCase '{case_id}' not found.")
 
+    if getattr(case, "case_type", None) == "MANUAL_EXTRACTION_REVIEW" or not case.proposed_recipient:
+        raise SecurityViolationError(
+            f"Case '{case_id}' is a manual extraction review without a validated payee proposal. "
+            "It cannot be approved into a new vendor version."
+        )
+
+    from app.models import validate_paypal_recipient_email
+    clean_recipient = validate_paypal_recipient_email(case.proposed_recipient)
+
     if case.state != "VENDOR_CONFIRMED":
         raise InvalidStateTransitionError(
             f"Case '{case_id}' cannot be approved: current state is '{case.state}', expected 'VENDOR_CONFIRMED'."
@@ -115,7 +124,7 @@ def approve_payee_change_case(
     new_digest = compute_vendor_version_digest(
         vendor_id=vendor.id,
         version_number=new_version_number,
-        paypal_recipient=case.proposed_recipient,
+        paypal_recipient=clean_recipient,
         contact_snapshot_email=vendor.trusted_contact_email,
     )
 
@@ -123,7 +132,7 @@ def approve_payee_change_case(
         id=new_version_id,
         vendor_id=vendor.id,
         version_number=new_version_number,
-        paypal_recipient=case.proposed_recipient.strip().lower(),
+        paypal_recipient=clean_recipient,
         contact_snapshot_email=vendor.trusted_contact_email.strip().lower(),
         verification_case_id=case.id,
         created_by_user_id=case.requester_id,
@@ -144,7 +153,7 @@ def approve_payee_change_case(
     appr_digest = compute_approval_digest(
         approval_type="CHANGE_CASE",
         bound_vendor_version_id=new_version_id,
-        bound_recipient=case.proposed_recipient,
+        bound_recipient=clean_recipient,
         approver_id=approver_id,
         requester_id=case.requester_id,
         expires_at=expires_at,
@@ -160,7 +169,7 @@ def approve_payee_change_case(
         approver_id=approver_id,
         decision="APPROVED",
         bound_vendor_version_id=new_version_id,
-        bound_recipient=case.proposed_recipient.strip().lower(),
+        bound_recipient=clean_recipient,
         bound_amount_minor=None,
         bound_currency=None,
         bound_invoice_reference=None,

@@ -32,8 +32,9 @@
   <div class="card">
     <div class="card-title"><span class="icon">📋</span> Case Summary</div>
     <table>
+      <tr><th>Case Type</th><td><span class="badge" style="background:rgba(59,130,246,.15);color:#93c5fd;">{{ case.case_type or 'RECIPIENT_CHANGE_PROPOSAL' }}</span></td></tr>
       <tr><th>State</th><td><span class="badge {{ badge_cls(case.state) }}">{{ case.state }}</span></td></tr>
-      <tr><th>Proposed Recipient</th><td class="td-mono" style="color:var(--warning);">{{ case.proposed_recipient }}</td></tr>
+      <tr><th>Proposed Recipient</th><td class="td-mono" style="color:var(--warning);">{{ case.proposed_recipient or "(None — Manual Extraction Review)" }}</td></tr>
       <tr><th>Source</th><td>{{ case.source_type }}</td></tr>
       <tr><th>Created</th><td>{{ fmt_dt(case.created_at) }}</td></tr>
     </table>
@@ -50,12 +51,26 @@
       </div>
       <div class="diff-col diff-new">
         <div class="diff-col-title">Proposed</div>
-        <div class="diff-field"><span class="diff-key">recipient</span><span class="diff-val diff-val-changed">{{ case.proposed_recipient }}</span></div>
-        <div class="diff-field"><span class="diff-key">status</span><span class="diff-val">UNVERIFIED</span></div>
+        <div class="diff-field"><span class="diff-key">recipient</span><span class="diff-val diff-val-changed">{{ case.proposed_recipient or "None (Manual Review)" }}</span></div>
+        <div class="diff-field"><span class="diff-key">status</span><span class="diff-val">{% if case.case_type == 'MANUAL_EXTRACTION_REVIEW' %}REVIEW_ONLY{% else %}UNVERIFIED{% endif %}</span></div>
       </div>
     </div>
   </div>
 </div>
+
+{# ── Manual Review Only Notice ── #}
+{% if case.case_type == 'MANUAL_EXTRACTION_REVIEW' %}
+<div class="alert alert-warning" style="margin-bottom:20px;">
+  <span class="alert-icon">⚠️</span>
+  <div class="alert-body">
+    <div class="alert-title">Manual Extraction Review Case</div>
+    This document was held due to extraction uncertainty or unextracted suspicious instructions.
+    <strong>No PayPal recipient change is proposed in this case.</strong>
+    Verification challenges and version activations are disabled. An operator must review the document manually.
+    If an actual recipient change is identified, an independent payee-change proposal must be created separately.
+  </div>
+</div>
+{% endif %}
 
 {# ── Challenge section ── #}
 <div class="card">
@@ -100,6 +115,11 @@
     {% endif %}
 
   {% elif case.state == "HELD" %}
+    {% if case.case_type == 'MANUAL_EXTRACTION_REVIEW' %}
+    <p style="color:var(--text-dim);margin-bottom:16px;font-size:.875rem;">
+      This case is held for manual extraction review. Out-of-band verification challenges cannot be dispatched because no recipient change was validated.
+    </p>
+    {% else %}
     <p style="color:var(--text-dim);margin-bottom:16px;font-size:.875rem;">
       No challenge has been issued yet. Issue an out-of-band HMAC-keyed verification challenge to the vendor's trusted contact email.
     </p>
@@ -107,6 +127,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn btn-warning">📤 Issue Verification Challenge</button>
     </form>
+    {% endif %}
   {% elif case.state == "VENDOR_CONFIRMED" %}
     <div class="alert alert-success">
       <span class="alert-icon">✅</span>

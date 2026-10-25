@@ -117,4 +117,86 @@ def test_extraction_uncertain_intake_forces_hold(db_session, monkeypatch):
     assert res.reason_code == "EXTRACTION_UNCERTAIN_FORCED_HOLD"
     assert res.case is not None
     assert res.case.state == "HELD"
-    assert res.case.proposed_recipient.upper() == "EXTRACTION_UNCERTAIN_MANUAL_REVIEW_REQUIRED"
+    assert res.case.case_type == "MANUAL_EXTRACTION_REVIEW"
+    assert res.case.proposed_recipient is None
+
+
+def test_manual_review_case_cannot_issue_challenge_or_activate_version(db_session):
+    """
+    Requirements:
+    1. A manual extraction review case cannot issue a verification challenge.
+    2. A manual extraction review case cannot be approved to create a new vendor version.
+    3. An uncertainty placeholder or invalid email can NEVER become a trusted recipient.
+    """
+    from app.services.challenges import issue_verification_challenge, create_payee_change_case
+    from app.services.approvals import approve_payee_change_case
+    from app.services.exceptions import SecurityViolationError
+    from app.models import VendorVersion, validate_paypal_recipient_email
+
+    db = db_session
+    asha, ravi = seed_default_users(db)
+    vendor, v1 = register_initial_vendor(
+        session=db,
+        name="Security First LLC",
+        trusted_contact_email="security@first.test",
+        initial_paypal_recipient="legit@first.test",
+        requester_id=asha.id,
+        approver_id=ravi.id,
+        independent_contact_proof_type="CONTRACT_ON_FILE",
+        proof_reference="SEC-001",
+    )
+    db.commit()
+
+    # Create a MANUAL_EXTRACTION_REVIEW case
+    review_case = create_payee_change_case(
+        session=db,
+        vendor_id=vendor.id,
+        proposed_recipient=None,
+        source_type="invoice_text",
+        source_reference="INV-UNCERTAIN",
+        requester_id=asha.id,
+        case_type="MANUAL_EXTRACTION_REVIEW",
+    )
+    db.commit()
+
+    # 1. Challenge issuance must be refused
+    with pytest.raises(SecurityViolationError, match="MANUAL_EXTRACTION_REVIEW"):
+        issue_verification_challenge(
+            session=db,
+            case_id=review_case.id,
+            actor_id=asha.id,
+        )
+
+    # 2. Even if someone forcefully changed state to VENDOR_CONFIRMED, approval must be refused
+    review_case.state = "VENDOR_CONFIRMED"
+    db.commit()
+
+    with pytest.raises(SecurityViolationError, match="manual extraction review"):
+        approve_payee_change_case(
+            session=db,
+            case_id=review_case.id,
+            approver_id=ravi.id,
+        )
+
+    # 3. Validation helper rejects placeholders and malformed emails
+    with pytest.raises(SecurityViolationError, match="Prohibited marker"):
+        validate_paypal_recipient_email("EXTRACTION_UNCERTAIN_MANUAL_REVIEW_REQUIRED@domain.com")
+
+    with pytest.raises(SecurityViolationError, match="Invalid PayPal recipient"):
+        validate_paypal_recipient_email("not-an-email-address")
+
+    # 4. Attempting to directly insert a VendorVersion with a placeholder or invalid email is blocked
+    bad_version = VendorVersion(
+        id="bad-v-999",
+        vendor_id=vendor.id,
+        version_number=2,
+        paypal_recipient="EXTRACTION_UNCERTAIN_MANUAL_REVIEW_REQUIRED",
+        contact_snapshot_email="test@test.com",
+        created_by_user_id=asha.id,
+        approved_by_user_id=ravi.id,
+        content_digest="dummy",
+    )
+    db.add(bad_version)
+    with pytest.raises(SecurityViolationError, match="Invalid PayPal recipient"):
+        db.flush()
+    db.rollback()

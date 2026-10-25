@@ -17,6 +17,7 @@ from app.services.exceptions import (
     InvalidChallengeError,
     InvalidStateTransitionError,
     MaxAttemptsExceededError,
+    SecurityViolationError,
     VendorFrozenError,
 )
 from app.services.vendor_registry import check_vendor_active, freeze_vendor, get_vendor
@@ -61,17 +62,24 @@ def compute_candidate_digest(
 def create_payee_change_case(
     session: Session,
     vendor_id: str,
-    proposed_recipient: str,
+    proposed_recipient: Optional[str],
     source_type: str,
     source_reference: str,
     requester_id: str,
     expires_in_hours: int = 48,
+    case_type: str = "RECIPIENT_CHANGE_PROPOSAL",
 ) -> PayeeChangeCase:
     """
-    Creates a new payee change case.
+    Creates a new payee change or manual extraction review case.
     A proposed recipient change enters the HELD state immediately.
     It can NEVER authorize or activate a change on its own.
+    
+    If case_type == "MANUAL_EXTRACTION_REVIEW", proposed_recipient MUST be None or empty.
+    If case_type == "RECIPIENT_CHANGE_PROPOSAL", proposed_recipient MUST be a validated email address.
     """
+    from app.models import validate_paypal_recipient_email
+    from app.services.exceptions import SecurityViolationError
+
     vendor = get_vendor(session, vendor_id)
     check_vendor_active(vendor)
 
@@ -79,11 +87,17 @@ def create_payee_change_case(
     if not active_version:
         raise ValueError(f"Vendor '{vendor_id}' has no active version.")
 
-    clean_proposed = proposed_recipient.strip().lower()
-
-    # If requested recipient is identical to active version, no change case needed
-    if clean_proposed == active_version.paypal_recipient.lower():
-        raise ValueError("Proposed recipient matches existing active vendor recipient.")
+    clean_proposed: Optional[str] = None
+    if case_type == "MANUAL_EXTRACTION_REVIEW":
+        clean_proposed = None
+    else:
+        case_type = "RECIPIENT_CHANGE_PROPOSAL"
+        if not proposed_recipient:
+            raise SecurityViolationError("Cannot create a RECIPIENT_CHANGE_PROPOSAL case without an explicit recipient.")
+        clean_proposed = validate_paypal_recipient_email(proposed_recipient)
+        # If requested recipient is identical to active version, no change case needed
+        if clean_proposed == active_version.paypal_recipient.lower():
+            raise ValueError("Proposed recipient matches existing active vendor recipient.")
 
     case_id = str(uuid.uuid4())
     source_digest = hashlib.sha256(f"{source_type}:{source_reference}".encode("utf-8")).hexdigest()
@@ -93,6 +107,7 @@ def create_payee_change_case(
         id=case_id,
         vendor_id=vendor_id,
         base_version_id=active_version.id,
+        case_type=case_type,
         proposed_recipient=clean_proposed,
         source_type=source_type,
         source_digest=source_digest,
@@ -108,7 +123,7 @@ def create_payee_change_case(
 
     record_audit_event(
         session=session,
-        event_type="PAYEE_CHANGE_PROPOSED_HELD",
+        event_type="PAYEE_CHANGE_PROPOSED_HELD" if case_type == "RECIPIENT_CHANGE_PROPOSAL" else "MANUAL_EXTRACTION_REVIEW_HELD",
         actor_id=requester_id,
         entity_type="PAYEE_CHANGE_CASE",
         entity_id=case_id,
@@ -116,6 +131,7 @@ def create_payee_change_case(
         state_after="HELD",
         details={
             "vendor_id": vendor_id,
+            "case_type": case_type,
             "base_version_id": active_version.id,
             "current_recipient": active_version.paypal_recipient,
             "proposed_recipient": clean_proposed,
@@ -140,6 +156,15 @@ def issue_verification_challenge(
     case = session.query(PayeeChangeCase).filter_by(id=case_id).first()
     if not case:
         raise ValueError(f"PayeeChangeCase '{case_id}' not found.")
+
+    if getattr(case, "case_type", None) == "MANUAL_EXTRACTION_REVIEW" or not case.proposed_recipient:
+        raise SecurityViolationError(
+            f"Cannot issue verification challenge for case '{case_id}': case is in MANUAL_EXTRACTION_REVIEW "
+            "with no validated recipient. An explicit payee-change proposal must be created first."
+        )
+
+    from app.models import validate_paypal_recipient_email
+    validate_paypal_recipient_email(case.proposed_recipient)
 
     if case.state not in ("HELD", "CHALLENGE_ISSUED"):
         raise InvalidStateTransitionError(f"Cannot issue challenge for case in state '{case.state}'.")
@@ -227,6 +252,14 @@ def verify_vendor_confirmation(
     case = session.query(PayeeChangeCase).filter_by(id=case_id).first()
     if not case:
         raise ValueError(f"PayeeChangeCase '{case_id}' not found.")
+
+    if getattr(case, "case_type", None) == "MANUAL_EXTRACTION_REVIEW" or not case.proposed_recipient:
+        raise SecurityViolationError(
+            f"Cannot verify confirmation for case '{case_id}': manual review cases cannot be confirmed as payee changes."
+        )
+
+    from app.models import validate_paypal_recipient_email
+    validate_paypal_recipient_email(case.proposed_recipient)
 
     vendor = get_vendor(session, case.vendor_id)
     check_vendor_active(vendor)

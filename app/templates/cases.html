@@ -16,6 +16,7 @@
       <thead>
         <tr>
           <th>Case ID</th>
+          <th>Case Type</th>
           <th>Proposed Recipient</th>
           <th>Source</th>
           <th>State</th>
@@ -27,7 +28,8 @@
       {% for c in cases %}
       <tr>
         <td class="td-mono">{{ short_id(c.id) }}</td>
-        <td class="td-mono">{{ c.proposed_recipient }}</td>
+        <td><span style="font-size:.75rem;">{{ c.case_type or 'RECIPIENT_CHANGE_PROPOSAL' }}</span></td>
+        <td class="td-mono">{{ c.proposed_recipient or "None (Manual Review)" }}</td>
         <td><span style="font-size:.75rem;color:var(--text-dim);">{{ c.source_type }}</span></td>
         <td><span class="badge {{ badge_cls(c.state) }}">{{ c.state }}</span></td>
         <td class="td-mono">{{ fmt_dt(c.created_at) }}</td>

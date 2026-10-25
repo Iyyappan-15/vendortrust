@@ -92,20 +92,35 @@ def process_incoming_document(
 
     # Step 3: Enforce hold if mismatch, suspicious instructions, or extraction uncertain.
     # EXTRACTION_UNCERTAIN always forces HOLD — AI failures must never weaken financial review.
+    # CRITICAL SECURITY SEPARATION:
+    # 1. Extraction uncertain / suspicious unextracted / unknown recipient -> MANUAL_EXTRACTION_REVIEW case.
+    #    Has proposed_recipient=None. Cannot issue challenges or activate new versions.
+    # 2. Genuine validated candidate recipient change -> RECIPIENT_CHANGE_PROPOSAL case.
+    #    Can proceed to verification challenge and approver activation only with a validated email.
     case: Optional[PayeeChangeCase] = None
     is_uncertain = getattr(candidate, "extraction_status", None) == EXTRACTION_STATUS_UNCERTAIN
 
     if decision == PolicyDecision.HOLD or candidate.suspicious_instructions_present or is_uncertain:
-        if is_uncertain and not candidate.suspicious_instructions_present:
-            # Uncertain extraction: hold without a specific proposed recipient
-            target_proposed = "EXTRACTION_UNCERTAIN_MANUAL_REVIEW_REQUIRED"
-            reason = "EXTRACTION_UNCERTAIN_FORCED_HOLD"
-        else:
-            target_proposed = candidate.proposed_recipient or "SUSPICIOUS_UNEXTRACTED_PAYEE"
-            if candidate.suspicious_instructions_present:
-                reason = "PAYEE_MISMATCH_WITH_SUSPICIOUS_INSTRUCTIONS"
+        case_type = "RECIPIENT_CHANGE_PROPOSAL"
+        target_proposed = None
 
-        if target_proposed != active_version.paypal_recipient:
+        if is_uncertain and not candidate.suspicious_instructions_present:
+            case_type = "MANUAL_EXTRACTION_REVIEW"
+            target_proposed = None
+            reason = "EXTRACTION_UNCERTAIN_FORCED_HOLD"
+        elif candidate.suspicious_instructions_present:
+            if candidate.proposed_recipient and candidate.proposed_recipient != active_version.paypal_recipient:
+                target_proposed = candidate.proposed_recipient
+                reason = "PAYEE_MISMATCH_WITH_SUSPICIOUS_INSTRUCTIONS"
+            else:
+                case_type = "MANUAL_EXTRACTION_REVIEW"
+                target_proposed = None
+                reason = "SUSPICIOUS_INSTRUCTIONS_MANUAL_REVIEW_REQUIRED"
+        else:
+            target_proposed = candidate.proposed_recipient
+
+        # Create case if this is a manual review or a real proposed change distinct from active version
+        if case_type == "MANUAL_EXTRACTION_REVIEW" or (target_proposed and target_proposed != active_version.paypal_recipient):
             case = create_payee_change_case(
                 session=session,
                 vendor_id=vendor.id,
@@ -113,6 +128,7 @@ def process_incoming_document(
                 source_type=source_type,
                 source_reference=source_reference,
                 requester_id=requester_id,
+                case_type=case_type,
             )
             decision = PolicyDecision.HOLD
 

@@ -37,6 +37,31 @@ def utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
+EMAIL_REGEX = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$"
+
+
+def validate_paypal_recipient_email(email_str: str) -> str:
+    """
+    Strict validation of a PayPal recipient email identifier.
+    Must match valid email syntax and CANNOT be any placeholder, marker, or wildcard.
+    Enforced across models and domain services to guarantee that uncertainty markers
+    can NEVER enter vendor versions or payout adapters.
+    """
+    import re
+    if not email_str or not isinstance(email_str, str):
+        raise SecurityViolationError("PayPal recipient must be a non-empty string.")
+    
+    cleaned = email_str.strip().lower()
+    if not re.fullmatch(EMAIL_REGEX, cleaned):
+        raise SecurityViolationError(f"Invalid PayPal recipient email format: '{email_str}'.")
+    
+    # Reject known placeholders or uncertainty markers even if formatted with @
+    if any(marker in cleaned for marker in ("extraction_uncertain", "manual_review_required", "suspicious_unextracted", "none_extracted")):
+        raise SecurityViolationError(f"Prohibited marker in PayPal recipient: '{email_str}'.")
+    
+    return cleaned
+
+
 class User(Base):
     """
     Seeded identities (e.g. Asha the requester, Ravi the approver).
@@ -116,6 +141,11 @@ class VendorVersion(Base):
 
 
 # Enforce strict immutability at the ORM level
+@event.listens_for(VendorVersion, "before_insert")
+def _vendor_version_before_insert(mapper, connection, target):
+    validate_paypal_recipient_email(target.paypal_recipient)
+
+
 @event.listens_for(VendorVersion, "before_update")
 def _vendor_version_before_update(mapper, connection, target):
     raise SecurityViolationError(f"VendorVersion records are strictly immutable. Update forbidden on version '{target.id}'.")
@@ -136,7 +166,12 @@ class PayeeChangeCase(Base):
     id = Column(String(36), primary_key=True)
     vendor_id = Column(String(36), ForeignKey("vendors.id", ondelete="RESTRICT"), nullable=False, index=True)
     base_version_id = Column(String(36), ForeignKey("vendor_versions.id"), nullable=False)
-    proposed_recipient = Column(String(255), nullable=False)
+    case_type = Column(
+        String(50),
+        default="RECIPIENT_CHANGE_PROPOSAL",
+        nullable=False,
+    )  # RECIPIENT_CHANGE_PROPOSAL, MANUAL_EXTRACTION_REVIEW
+    proposed_recipient = Column(String(255), nullable=True)  # NULL for manual extraction review
     source_type = Column(String(50), nullable=False)  # INVOICE_PROPOSAL, MANUAL_PROPOSAL, EMAIL_EXTRACT
     source_digest = Column(String(64), nullable=False)
     requester_id = Column(String(36), ForeignKey("users.id"), nullable=False)
