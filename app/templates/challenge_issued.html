@@ -12,45 +12,41 @@
 <div class="alert alert-warning" style="border-width:2px;">
   <span class="alert-icon">⚠️</span>
   <div class="alert-body">
-    <div class="alert-title">Trust Boundary Disclosure (Hackathon Simulation)</div>
-    In a real production system, the verification token is delivered via SMTP/SMS strictly out-of-band to the vendor's pre-established trusted contact (<span class="td-mono">{{ challenge.delivery_destination }}</span>).
-    The buyer/requester has <strong>no visibility</strong> into the vendor's private email.
-    For hackathon evaluation, the generated OTP is shown below inside the <strong>Simulated Vendor Mailbox</strong> block so you can test both the confirmation and compromise paths without setting up external mail servers.
+    <div class="alert-title">Trust Boundary Disclosure — Requester View</div>
+    In a real deployment, this verification code is sent via SMTP/SMS <strong>out-of-band</strong> to the vendor's pre-registered trusted contact
+    (<span class="td-mono">{{ challenge.delivery_destination }}</span>).
+    <strong>The requester has no visibility into the vendor's private inbox.</strong>
+    For this hackathon simulation, the code is accessible only inside the
+    <a href="/cases/{{ case_id }}/vendor-mailbox" style="color:var(--warning);">Simulated Vendor Mailbox</a>,
+    which represents the vendor's separate email persona.
   </div>
 </div>
 
 <div class="card" style="border-color:rgba(245,158,11,.35);">
   <div class="card-title">
-    <span class="icon">📬</span> Simulated External Vendor Mailbox
-    <span class="badge badge-mock" style="margin-left:8px;">Demo Persona: Vendor Contact</span>
+    <span class="icon">📬</span> Challenge Dispatched
+    <span class="badge badge-challenge" style="margin-left:8px;">AWAITING VENDOR RESPONSE</span>
   </div>
-  <p style="color:var(--text-dim);font-size:.875rem;margin-bottom:16px;">
-    The following message was dispatched to the vendor's external mailbox.
+  <p style="color:var(--text-dim);font-size:.875rem;margin-bottom:20px;">
+    A single-use verification code was securely generated and dispatched to the vendor's trusted contact.
+    Only the keyed HMAC-SHA256 hash is stored in the database — the plaintext code is held in an ephemeral session-scoped mailbox only.
   </p>
 
-  <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:20px;max-width:560px;">
-    <div style="font-size:.75rem;color:var(--text-xs);margin-bottom:8px;">
-      FROM: security@vendortrust.app &nbsp;|&nbsp; TO: {{ challenge.delivery_destination }}
-    </div>
-    <div style="font-size:.875rem;margin-bottom:16px;color:var(--text-dim);">
-      Subject: Security Verification — Requested PayPal Change<br><br>
-      Please confirm if your company requested to change your approved PayPal recipient address.<br><br>
-      <strong>Your single-use verification code is:</strong>
-    </div>
-    <div style="background:var(--bg);border:2px dashed var(--warning);border-radius:6px;padding:16px;text-align:center;margin-bottom:16px;">
-      <div style="font-size:1.6rem;font-weight:800;letter-spacing:.15em;color:var(--warning);font-family:monospace;">{{ raw_token }}</div>
-    </div>
-    <div style="font-size:.75rem;color:var(--text-xs);">
-      This token expires in 15 minutes. Stored on server strictly as a keyed HMAC-SHA256 hash. Plaintext is never stored in the database.
+  <div class="alert alert-info" style="margin-bottom:20px;">
+    <span class="alert-icon">📬</span>
+    <div class="alert-body">
+      <div class="alert-title">Open the Simulated Vendor Mailbox to retrieve the code</div>
+      Switch to the Vendor persona to view the verification email and either confirm or report the change.
+      The code is not shown here — this page represents the requester's view only.
     </div>
   </div>
 
-  <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
     <a href="/cases/{{ case_id }}/vendor-mailbox" class="btn btn-warning">
-      📬 Open Full Simulated Vendor Mailbox →
+      📬 Open Simulated Vendor Mailbox →
     </a>
     <a href="/cases/{{ case_id }}" class="btn btn-primary">
-      Enter Code on Case View →
+      Return to Case View →
     </a>
   </div>
 </div>
@@ -64,6 +60,7 @@
     <tr><th>Expires at</th><td>{{ fmt_dt(challenge.expires_at) }}</td></tr>
     <tr><th>Max verification attempts</th><td>{{ challenge.max_attempts }}</td></tr>
     <tr><th>Cryptographic storage</th><td class="td-mono" style="color:var(--success);">Keyed HMAC-SHA256 (Bound to Challenge ID + Case ID + Proposed Recipient)</td></tr>
+    <tr><th>Plaintext storage</th><td style="color:var(--warning);">Ephemeral session mailbox only — purged on consumption, rejection, or expiry</td></tr>
   </table>
 </div>
 {% endblock %}

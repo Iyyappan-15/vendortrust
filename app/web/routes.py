@@ -57,7 +57,13 @@ from app.services.payouts import MockPayoutProvider, submit_approved_payout
 from app.services.policy import PolicyDecision
 from app.services.vendor_registry import get_vendor
 from app.web.deps import DemoContext, assert_csrf, require_demo_context
-from app.web.session import new_demo_session, destroy_demo_session
+from app.web.session import (
+    new_demo_session,
+    destroy_demo_session,
+    store_simulated_challenge_otp,
+    get_simulated_challenge_otp,
+    consume_simulated_challenge_otp,
+)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -316,10 +322,19 @@ async def issue_challenge(
     except Exception as e:
         raise HTTPException(400, str(e))
 
+    # Store plaintext OTP only in ephemeral session-scoped mailbox store.
+    # The challenge DB table retains only the keyed HMAC.
+    store_simulated_challenge_otp(
+        session_token=ctx.session_token,
+        case_id=case_id,
+        raw_token=raw_token,
+        expires_at=challenge.expires_at,
+    )
+
     return templates.TemplateResponse(request=request, name="challenge_issued.html", context={
         "case_id": case_id,
         "challenge": challenge,
-        "raw_token": raw_token,
+        # raw_token NOT passed here — requester sees only link to vendor mailbox
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
         "csrf_token": ctx.csrf_token,
@@ -335,6 +350,7 @@ async def vendor_simulated_mailbox(
     """
     Dedicated view for Simulated Vendor External Mailbox (Demo Persona: Vendor Contact).
     Explicitly separated from the requester view to demonstrate trust boundaries honestly.
+    Retrieves plaintext OTP from ephemeral session-scoped mailbox store — never from DB.
     """
     db = ctx.db
     case = db.query(PayeeChangeCase).filter_by(id=case_id).first()
@@ -349,10 +365,14 @@ async def vendor_simulated_mailbox(
         .first()
     )
 
+    # Retrieve ephemeral plaintext OTP from session mailbox (never from DB)
+    otp_for_display = get_simulated_challenge_otp(ctx.session_token, case_id)
+
     return templates.TemplateResponse(request=request, name="vendor_mailbox.html", context={
         "case": case,
         "vendor": vendor,
         "challenge": challenge,
+        "otp_for_display": otp_for_display,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
         "csrf_token": ctx.csrf_token,
@@ -380,6 +400,8 @@ async def verify_challenge(
     except (InvalidChallengeError, MaxAttemptsExceededError, ExpiredChallengeError) as e:
         raise HTTPException(400, str(e))
 
+    # Consume and purge ephemeral plaintext OTP after successful verification
+    consume_simulated_challenge_otp(ctx.session_token, case_id)
     return RedirectResponse(url=f"/cases/{case_id}", status_code=303)
 
 
@@ -403,6 +425,8 @@ async def reject_compromise(
     except Exception as e:
         raise HTTPException(400, str(e))
 
+    # Consume and purge ephemeral plaintext OTP on compromise report
+    consume_simulated_challenge_otp(ctx.session_token, case_id)
     return RedirectResponse(url=f"/cases/{case_id}", status_code=303)
 
 

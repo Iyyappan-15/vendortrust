@@ -125,6 +125,7 @@ def new_demo_session() -> str:
             "csrf_token": csrf_token,
             "created_at": now,
             "last_accessed_at": now,
+            "simulated_mailboxes": {},
         }
     return token
 
@@ -175,3 +176,72 @@ def validate_csrf_token(token: str, submitted_csrf: Optional[str]) -> bool:
     if not expected_csrf:
         return False
     return secrets.compare_digest(submitted_csrf.strip(), expected_csrf.strip())
+
+
+def store_simulated_challenge_otp(
+    session_token: str,
+    case_id: str,
+    raw_token: str,
+    expires_at: Any,
+) -> None:
+    """
+    Store ephemeral plaintext OTP in session-scoped mailbox store for simulated vendor display only.
+    Plaintext is NEVER stored in SQLite or audit tables.
+    """
+    if not session_token or not case_id or not raw_token:
+        return
+    import datetime
+    if isinstance(expires_at, datetime.datetime):
+        if expires_at.tzinfo is None:
+            # Naive UTC datetime from utcnow() — attach UTC timezone so timestamp() is correct
+            exp_ts = expires_at.replace(tzinfo=datetime.timezone.utc).timestamp()
+        else:
+            exp_ts = expires_at.timestamp()
+    else:
+        exp_ts = time.time() + 900
+
+    with _store_lock:
+        data = _demo_store.get(session_token)
+        if data is not None:
+            mailboxes = data.setdefault("simulated_mailboxes", {})
+            mailboxes[case_id] = {
+                "raw_token": raw_token,
+                "expires_at": exp_ts,
+                "consumed": False,
+            }
+
+
+def get_simulated_challenge_otp(session_token: str, case_id: str) -> Optional[str]:
+    """
+    Retrieve plaintext OTP for simulated mailbox display if not expired or consumed.
+    Returns None if expired, consumed, or session invalid.
+    """
+    if not session_token or not case_id:
+        return None
+    now = time.time()
+    with _store_lock:
+        data = _demo_store.get(session_token)
+        if not data:
+            return None
+        mailboxes = data.get("simulated_mailboxes", {})
+        item = mailboxes.get(case_id)
+        if not item:
+            return None
+        if item.get("consumed") or now > item.get("expires_at", 0):
+            # Prune expired or consumed token
+            mailboxes.pop(case_id, None)
+            return None
+        return item.get("raw_token")
+
+
+def consume_simulated_challenge_otp(session_token: str, case_id: str) -> None:
+    """
+    Explicitly consume and purge the ephemeral plaintext OTP upon verification, rejection, or expiry.
+    """
+    if not session_token or not case_id:
+        return
+    with _store_lock:
+        data = _demo_store.get(session_token)
+        if data:
+            mailboxes = data.get("simulated_mailboxes", {})
+            mailboxes.pop(case_id, None)

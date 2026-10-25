@@ -70,6 +70,18 @@
   </div>
   {% endif %}
 
+  {% if result.candidate.extraction_status == 'EXTRACTION_UNCERTAIN' %}
+  <div class="alert alert-danger" style="margin-bottom:14px;">
+    <span class="alert-icon">⚠️</span>
+    <div class="alert-body">
+      <div class="alert-title">Extraction Uncertain — Manual Review Required</div>
+      The AI extraction engine failed and the heuristic fallback could not reliably interpret this document.
+      <strong>This document has been automatically held and classified as uncertain.</strong>
+      It has not been cleared or approved. An uncertain extraction result can never approve a payout.
+    </div>
+  </div>
+  {% endif %}
+
   <div class="ai-callout">
     <div class="ai-callout-header">
       🤖 {% if result.candidate.extraction_provider == 'GEMINI' %}Gemini AI Model ({{ result.candidate.model_version }}){% else %}Deterministic Fallback Engine{% endif %} — Advisory Output Only
@@ -79,6 +91,18 @@
         <tr>
           <th style="width:200px;padding:8px 12px;text-align:left;color:var(--text-dim);">Extraction Provider</th>
           <td style="padding:8px 12px;font-family:monospace;font-weight:600;">{{ result.candidate.extraction_provider }}</td>
+        </tr>
+        <tr>
+          <th style="width:200px;padding:8px 12px;text-align:left;color:var(--text-dim);">Extraction Status</th>
+          <td style="padding:8px 12px;">
+            {% if result.candidate.extraction_status == 'CHANGE_DETECTED' %}
+              <span style="color:var(--warning);font-weight:700;">⚠️ CHANGE_DETECTED</span>
+            {% elif result.candidate.extraction_status == 'EXTRACTION_UNCERTAIN' %}
+              <span style="color:var(--danger);font-weight:700;">🚨 EXTRACTION_UNCERTAIN — forced hold</span>
+            {% else %}
+              <span style="color:var(--success);">✅ NO_CHANGE_DETECTED</span>
+            {% endif %}
+          </td>
         </tr>
         <tr>
           <th style="width:200px;padding:8px 12px;text-align:left;color:var(--text-dim);">Payee change requested</th>

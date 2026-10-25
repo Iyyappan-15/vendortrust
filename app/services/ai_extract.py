@@ -8,6 +8,8 @@ Strict Security Constraints:
 - Prompt injection attempts are detected and flagged.
 - Strict Pydantic schema validation.
 - Deterministic heuristic fallback ensures test repeatability and offline reliability.
+- EXTRACTION_UNCERTAIN is returned when AI fails and the heuristic cannot confidently
+  interpret the source — ensuring AI failures never weaken financial review requirements.
 """
 
 import json
@@ -30,6 +32,11 @@ SUSPICIOUS_PATTERNS = [
 ]
 
 EMAIL_REGEX = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+"
+
+# Extraction outcome status constants
+EXTRACTION_STATUS_CHANGE_DETECTED = "CHANGE_DETECTED"
+EXTRACTION_STATUS_NO_CHANGE = "NO_CHANGE_DETECTED"
+EXTRACTION_STATUS_UNCERTAIN = "EXTRACTION_UNCERTAIN"
 
 
 class CandidateExtractionResult(BaseModel):
@@ -72,6 +79,15 @@ class CandidateExtractionResult(BaseModel):
     model_version: Optional[str] = Field(
         None,
         description="Specific model identifier when GEMINI is executed."
+    )
+    extraction_status: str = Field(
+        EXTRACTION_STATUS_NO_CHANGE,
+        description=(
+            "Outcome classification: "
+            "CHANGE_DETECTED (candidate found), "
+            "NO_CHANGE_DETECTED (extraction succeeded, no change), "
+            "EXTRACTION_UNCERTAIN (extraction failed or input uninterpretable — requires manual review)."
+        )
     )
 
     @field_validator("proposed_recipient")
@@ -151,6 +167,15 @@ def heuristic_extract_candidate(
         )
     )
 
+    # Determine extraction status
+    if is_suspicious or payee_change:
+        status = EXTRACTION_STATUS_CHANGE_DETECTED if payee_change else EXTRACTION_STATUS_CHANGE_DETECTED
+    elif fallback_reason:
+        # Heuristic being invoked as fallback for a failed AI call — uncertain if no match found
+        status = EXTRACTION_STATUS_UNCERTAIN if not payee_change and not is_suspicious else EXTRACTION_STATUS_CHANGE_DETECTED
+    else:
+        status = EXTRACTION_STATUS_NO_CHANGE
+
     return CandidateExtractionResult(
         payee_change_requested=payee_change,
         proposed_recipient=proposed_recipient if payee_change else None,
@@ -162,6 +187,31 @@ def heuristic_extract_candidate(
         extraction_provider="HEURISTIC",
         fallback_reason=fallback_reason,
         model_version=None,
+        extraction_status=status,
+    )
+
+
+def uncertain_extraction_result(
+    source_type: str,
+    reason: str,
+) -> CandidateExtractionResult:
+    """
+    Returns an EXTRACTION_UNCERTAIN result that forces manual review.
+    Used when both AI inference and heuristic fallback fail to reliably interpret
+    the source. Fails closed: never labels an uncertain document as clean.
+    """
+    return CandidateExtractionResult(
+        payee_change_requested=False,
+        proposed_recipient=None,
+        evidence_snippet=None,
+        source_type=source_type,
+        confidence_note=f"Extraction uncertain: {reason}. Manual review required.",
+        suspicious_instructions_present=False,
+        needs_human_review=True,
+        extraction_provider="HEURISTIC",
+        fallback_reason=reason,
+        model_version=None,
+        extraction_status=EXTRACTION_STATUS_UNCERTAIN,
     )
 
 
@@ -175,13 +225,25 @@ def extract_candidate_payee_change(
     Calls Gemini API if available; falls back cleanly to deterministic heuristic extractor.
     Reports the actual execution provider honestly: GEMINI, HEURISTIC, or RECORDED_DEMO.
     AI can only propose a candidate; it can NEVER authorize or mutate state.
+
+    Outcome classification (extraction_status):
+    - CHANGE_DETECTED: a proposed recipient was identified (must be verified).
+    - NO_CHANGE_DETECTED: extraction succeeded and found no recipient change.
+    - EXTRACTION_UNCERTAIN: AI failed and heuristic cannot reliably interpret the source.
+      An uncertain document always requires manual review and is NEVER labeled clean.
     """
     if force_heuristic:
-        return heuristic_extract_candidate(
+        # User explicitly requested heuristic offline extraction.
+        # Record fallback_reason honestly as requested offline extraction,
+        # but do NOT classify as EXTRACTION_UNCERTAIN for clean/known documents.
+        res = heuristic_extract_candidate(
             untrusted_text,
             source_type=source_type,
             fallback_reason="User requested offline/heuristic extraction.",
         )
+        if not res.payee_change_requested and not res.suspicious_instructions_present:
+            res.extraction_status = EXTRACTION_STATUS_NO_CHANGE
+        return res
 
     import os
     api_key = (os.getenv("GEMINI_API_KEY") or GEMINI_API_KEY or "").strip()
@@ -192,11 +254,23 @@ def extract_candidate_payee_change(
     )
 
     if not has_valid_key:
-        return heuristic_extract_candidate(
+        # No AI key — fall back to heuristic and mark uncertain if heuristic has low confidence
+        fallback = heuristic_extract_candidate(
             untrusted_text,
             source_type=source_type,
             fallback_reason="No valid GEMINI_API_KEY configured in server environment.",
         )
+        # If heuristic didn't find a clear change and there's no suspicious signal, mark uncertain
+        # so ambiguous free-text descriptions don't silently appear clean
+        if not fallback.payee_change_requested and not fallback.suspicious_instructions_present:
+            fallback = uncertain_extraction_result(
+                source_type=source_type,
+                reason=(
+                    "No valid GEMINI_API_KEY configured and the heuristic engine could not "
+                    "confidently determine whether a payee change is requested. Manual review required."
+                ),
+            )
+        return fallback
 
     # Attempt Gemini API inference with configured or default model
     model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
@@ -235,22 +309,37 @@ UNTRUSTED SOURCE TEXT:
             if resp.status_code == 200:
                 raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
                 parsed = json.loads(raw_json)
-                return CandidateExtractionResult(
+                result = CandidateExtractionResult(
                     **parsed,
                     extraction_provider="GEMINI",
                     fallback_reason=None,
                     model_version=model_name,
+                    extraction_status=(
+                        EXTRACTION_STATUS_CHANGE_DETECTED
+                        if parsed.get("payee_change_requested") or parsed.get("suspicious_instructions_present")
+                        else EXTRACTION_STATUS_NO_CHANGE
+                    ),
                 )
+                return result
             else:
                 err_snippet = resp.text[:150]
-                return heuristic_extract_candidate(
+                fail_reason = f"Gemini API returned HTTP {resp.status_code}: {err_snippet}"
+                # Gemini failed — heuristic fallback, but classify uncertain if no clear signal
+                fallback = heuristic_extract_candidate(
                     untrusted_text,
                     source_type=source_type,
-                    fallback_reason=f"Gemini API returned HTTP {resp.status_code}: {err_snippet}",
+                    fallback_reason=fail_reason,
                 )
+                if not fallback.payee_change_requested and not fallback.suspicious_instructions_present:
+                    return uncertain_extraction_result(source_type=source_type, reason=fail_reason)
+                return fallback
     except Exception as e:
-        return heuristic_extract_candidate(
+        fail_reason = f"Gemini API request failed: {type(e).__name__} ({str(e)[:100]})"
+        fallback = heuristic_extract_candidate(
             untrusted_text,
             source_type=source_type,
-            fallback_reason=f"Gemini API request failed: {type(e).__name__} ({str(e)[:100]})",
+            fallback_reason=fail_reason,
         )
+        if not fallback.payee_change_requested and not fallback.suspicious_instructions_present:
+            return uncertain_extraction_result(source_type=source_type, reason=fail_reason)
+        return fallback

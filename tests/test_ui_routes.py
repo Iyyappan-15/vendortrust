@@ -31,12 +31,24 @@ def client():
     return TestClient(app, raise_server_exceptions=True, follow_redirects=True)
 
 
+def _make_stateful_client():
+    """Return a TestClient that persists cookies automatically across requests.
+
+    The Starlette TestClient (based on httpx) supports per-instance cookies
+    via client.cookies, so we don't need to pass cookies= on every call.
+    This avoids the DeprecationWarning about per-request cookie persistence.
+    """
+    return TestClient(app, raise_server_exceptions=True, follow_redirects=True)
+
+
 def _start_session(client: TestClient):
-    """Start a fresh demo session and return the session cookie."""
+    """Start a fresh demo session and set the session cookie on the client instance."""
     r = client.post("/start-demo", follow_redirects=False)
     assert r.status_code == 303
     cookie = r.cookies.get("demo_session")
     assert cookie, "No demo_session cookie set"
+    # Set cookie on client instance so it persists for all subsequent requests.
+    client.cookies.set("demo_session", cookie)
     return {"demo_session": cookie}
 
 
@@ -150,13 +162,17 @@ def test_issue_challenge_and_verify_flow(client):
     csrf = _get_csrf(cookies)
     case_id = _create_case_and_get_id(client, cookies)
 
-    # Issue challenge
+    # Issue challenge — page no longer shows raw OTP (trust boundary)
     r = client.post(f"/cases/{case_id}/issue-challenge", data={"csrf_token": csrf}, cookies=cookies)
     assert r.status_code == 200
     assert "Verification Challenge Dispatched" in r.text or "Simulated External Vendor Mailbox" in r.text
 
-    token_match = re.search(r'style="font-size:1\.6rem[^>]+>([^<]+)</div>', r.text)
-    assert token_match, "Could not extract OTP token"
+    # OTP is in the simulated vendor mailbox, not the requester page
+    r_mailbox = client.get(f"/cases/{case_id}/vendor-mailbox", cookies=cookies)
+    assert r_mailbox.status_code == 200
+    # OTP element in vendor_mailbox.html uses font-size:1.8rem
+    token_match = re.search(r'font-size:1\.8rem[^>]+>([^\s<]{6,})<', r_mailbox.text)
+    assert token_match, "Could not extract OTP token from vendor mailbox"
 
 
 def test_full_case_to_payout_flow(client):
@@ -180,8 +196,12 @@ def test_full_case_to_payout_flow(client):
     r = client.post(f"/cases/{case_id}/issue-challenge", data={"csrf_token": csrf}, cookies=cookies)
     assert r.status_code == 200
 
-    token_match = re.search(r'style="font-size:1\.6rem[^>]+>([^\s<]+)</div>', r.text)
-    assert token_match, "Could not extract OTP token from challenge page"
+    # OTP is now in the simulated vendor mailbox (trust boundary enforcement)
+    r_mailbox = client.get(f"/cases/{case_id}/vendor-mailbox", cookies=cookies)
+    assert r_mailbox.status_code == 200
+    # OTP element in vendor_mailbox.html uses font-size:1.8rem
+    token_match = re.search(r'font-size:1\.8rem[^>]+>([^\s<]{6,})<', r_mailbox.text)
+    assert token_match, "Could not extract OTP token from vendor mailbox"
     raw_token = token_match.group(1).strip()
 
     # Step 3: Verify
@@ -389,7 +409,7 @@ def test_simulated_vendor_mailbox_renders(client):
     r = client.get(f"/cases/{case_id}/vendor-mailbox", cookies=cookies)
     assert r.status_code == 200
     assert "Simulated Vendor Mailbox" in r.text
-    assert "Trust Assumption & Simulation Disclosure" in r.text
+    assert "Simulation Disclosure" in r.text
     assert "changed-vendor@acme-design.test" in r.text
     assert "This Wasn't Me" in r.text
 

@@ -3,12 +3,22 @@ app/services/intake.py — Invoice/Email Intake Pipeline & Deterministic Case Cr
 
 Binds untrusted text extraction to deterministic policy guards.
 Guarantees that an invoice or AI proposal can NEVER authorize or directly execute a recipient change.
+
+Extraction outcomes:
+- CHANGE_DETECTED: proposed recipient found — HOLD created for review.
+- NO_CHANGE_DETECTED: extraction succeeded, no change found — ALLOW_REVIEW (normal payment flow).
+- EXTRACTION_UNCERTAIN: AI failed and heuristic cannot reliably interpret source — forced HOLD.
+  An uncertain document is never labeled clean; manual review is mandatory.
 """
 
 from typing import Any, Dict, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.models import PayeeChangeCase, Vendor, VendorVersion
-from app.services.ai_extract import CandidateExtractionResult, extract_candidate_payee_change
+from app.services.ai_extract import (
+    CandidateExtractionResult,
+    EXTRACTION_STATUS_UNCERTAIN,
+    extract_candidate_payee_change,
+)
 from app.services.audit import record_audit_event
 from app.services.challenges import create_payee_change_case
 from app.services.policy import PolicyDecision, evaluate_payee_change_proposal
@@ -80,11 +90,21 @@ def process_incoming_document(
         candidate_recipient=candidate.proposed_recipient if candidate.payee_change_requested else None,
     )
 
-    # Step 3: Enforce hold if mismatch or suspicious prompt injection present
+    # Step 3: Enforce hold if mismatch, suspicious instructions, or extraction uncertain.
+    # EXTRACTION_UNCERTAIN always forces HOLD — AI failures must never weaken financial review.
     case: Optional[PayeeChangeCase] = None
+    is_uncertain = getattr(candidate, "extraction_status", None) == EXTRACTION_STATUS_UNCERTAIN
 
-    if decision == PolicyDecision.HOLD or candidate.suspicious_instructions_present:
-        target_proposed = candidate.proposed_recipient or "SUSPICIOUS_UNEXTRACTED_PAYEE"
+    if decision == PolicyDecision.HOLD or candidate.suspicious_instructions_present or is_uncertain:
+        if is_uncertain and not candidate.suspicious_instructions_present:
+            # Uncertain extraction: hold without a specific proposed recipient
+            target_proposed = "EXTRACTION_UNCERTAIN_MANUAL_REVIEW_REQUIRED"
+            reason = "EXTRACTION_UNCERTAIN_FORCED_HOLD"
+        else:
+            target_proposed = candidate.proposed_recipient or "SUSPICIOUS_UNEXTRACTED_PAYEE"
+            if candidate.suspicious_instructions_present:
+                reason = "PAYEE_MISMATCH_WITH_SUSPICIOUS_INSTRUCTIONS"
+
         if target_proposed != active_version.paypal_recipient:
             case = create_payee_change_case(
                 session=session,
@@ -95,8 +115,6 @@ def process_incoming_document(
                 requester_id=requester_id,
             )
             decision = PolicyDecision.HOLD
-            if candidate.suspicious_instructions_present:
-                reason = "PAYEE_MISMATCH_WITH_SUSPICIOUS_INSTRUCTIONS"
 
     # Step 4: Audit logging
     audit = record_audit_event(
@@ -112,6 +130,8 @@ def process_incoming_document(
             "source_reference": source_reference,
             "candidate_payee_change_requested": candidate.payee_change_requested,
             "candidate_proposed_recipient": candidate.proposed_recipient,
+            "extraction_status": getattr(candidate, "extraction_status", "UNKNOWN"),
+            "extraction_provider": getattr(candidate, "extraction_provider", "UNKNOWN"),
             "suspicious_instructions": candidate.suspicious_instructions_present,
             "decision": decision,
             "reason": reason,

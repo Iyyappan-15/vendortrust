@@ -3,7 +3,7 @@
 {% block content %}
 <div class="flex-between mb-16">
   <div>
-    <div class="page-title">📬 Simulated External Vendor Mailbox</div>
+    <div class="page-title">📬 Simulated Vendor Mailbox</div>
     <div class="page-sub">Persona: Vendor Contact (<span class="td-mono">{{ vendor.trusted_contact_email }}</span>)</div>
   </div>
   <a href="/cases/{{ case.id }}" class="btn btn-outline">← Back to Requester View</a>
@@ -12,9 +12,11 @@
 <div class="alert alert-warning" style="border-width:2px;">
   <span class="alert-icon">⚠️</span>
   <div class="alert-body">
-    <div class="alert-title">Trust Assumption & Simulation Disclosure</div>
-    <strong>Simulation Mode Only:</strong> In a production deployment, this verification email is delivered out-of-band via external SMTP directly to the vendor's mail server. The buyer/requester has no access to this mailbox.
-    For hackathon evaluation and zero-dependency interactive demonstration, this screen simulates the vendor's private email client to show how the vendor reviews the request and either confirms it or flags a compromise.
+    <div class="alert-title">Trust Assumption &amp; Simulation Disclosure</div>
+    <strong>Simulation Mode Only.</strong> In production, this security email is delivered <strong>out-of-band</strong> via external SMTP to the vendor's mail server at
+    <span class="td-mono">{{ vendor.trusted_contact_email }}</span>. The requester has no access to this inbox.
+    This screen demonstrates the vendor's separate private email persona for hackathon evaluation only.
+    The public demo does not establish real-world vendor identity.
   </div>
 </div>
 
@@ -35,31 +37,44 @@
     </div>
 
     <div style="font-size:.875rem;line-height:1.7;color:var(--text);">
-      <p>Hello Acme Design Labs Billing Team,</p>
+      <p>Hello {{ vendor.name }} Billing Team,</p>
       <br>
-      <p>We received a request through our accounts payable portal to update your approved PayPal disbursement address from your current record to:</p>
+      <p>We received a request through our accounts payable portal to update your approved PayPal disbursement address to:</p>
       <div style="background:var(--bg);border-left:3px solid var(--warning);padding:10px 14px;margin:12px 0;font-family:monospace;font-size:.9rem;color:var(--warning);">
         Proposed New Recipient: {{ case.proposed_recipient }}
       </div>
-      <p>To confirm that your organization authorized this change, enter the following single-use verification token:</p>
-      
+      <p>To confirm that your organization authorized this change, enter the single-use verification code sent below:</p>
+
+      {% if otp_for_display %}
       <div style="background:var(--bg);border:2px dashed var(--accent);border-radius:6px;padding:16px;text-align:center;margin:16px 0;">
-        <div style="font-size:.75rem;color:var(--text-xs);margin-bottom:4px;">ONE-TIME SECURITY PASSCODE (EXPIRES IN 15 MINUTES)</div>
-        <div style="font-size:1.8rem;font-weight:800;letter-spacing:.15em;color:var(--accent);font-family:monospace;">{{ challenge.token_hash[:12] }}... [HMAC-SHA256 Token on Server]</div>
+        <div style="font-size:.75rem;color:var(--text-xs);margin-bottom:6px;">ONE-TIME SECURITY PASSCODE (EXPIRES {{ fmt_dt(challenge.expires_at) }})</div>
+        <div style="font-size:1.8rem;font-weight:800;letter-spacing:.15em;color:var(--accent);font-family:monospace;">{{ otp_for_display }}</div>
+        <div style="font-size:.7rem;color:var(--text-xs);margin-top:6px;">Single-use · Expires 15 min · Stored on server as keyed HMAC-SHA256 only</div>
       </div>
+      {% else %}
+      <div class="alert alert-danger" style="margin:16px 0;">
+        <span class="alert-icon">⚠️</span>
+        <div class="alert-body">
+          <div class="alert-title">Verification Code Unavailable</div>
+          The code has already been used, has expired, or this session has been reset.
+          Return to the case and issue a new verification challenge.
+        </div>
+      </div>
+      {% endif %}
 
       <p style="font-size:.8rem;color:var(--text-dim);">
-        <strong>Did not request this change?</strong> If anyone at your company did not request this update, click <em>Report Compromise</em> below immediately. This will freeze your account and alert our fraud team.
+        <strong>Did not request this change?</strong> If no one at your company requested this update, click <em>Report Compromise</em> immediately. This will freeze your account and halt all payouts.
       </p>
     </div>
   </div>
 
+  {% if otp_for_display %}
   <div style="display:flex;gap:16px;flex-wrap:wrap;">
     <form method="post" action="/cases/{{ case.id }}/verify" style="flex:1;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="form-row">
         <label class="form-label">Simulate Vendor Entering Code:</label>
-        <input type="text" name="submitted_token" class="form-input" placeholder="Paste verification code provided to vendor" required>
+        <input type="text" name="submitted_token" class="form-input" value="{{ otp_for_display }}" required autocomplete="off">
       </div>
       <button type="submit" class="btn btn-primary" style="width:100%;">
         ✅ Vendor Confirms: "Yes, I Requested This Change"
@@ -76,7 +91,9 @@
       </div>
     </form>
   </div>
+  {% endif %}
 </div>
+
 {% elif case.state == "VENDOR_CONFIRMED" %}
 <div class="alert alert-success">
   <span class="alert-icon">✅</span>
@@ -86,6 +103,7 @@
   </div>
 </div>
 <a href="/cases/{{ case.id }}" class="btn btn-primary">Return to Case for Approver Review →</a>
+
 {% elif case.state == "REJECTED_COMPROMISE_SUSPECTED" %}
 <div class="alert alert-danger">
   <span class="alert-icon">🚨</span>
@@ -95,6 +113,7 @@
   </div>
 </div>
 <a href="/cases/{{ case.id }}" class="btn btn-outline">Return to Case Overview →</a>
+
 {% else %}
 <div class="card">
   <div class="empty-state">
