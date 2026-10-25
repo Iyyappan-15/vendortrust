@@ -12,6 +12,7 @@ Security Invariants enforced in every handler:
 """
 import datetime
 import json
+import os
 from typing import Optional
 
 from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Request, Response
@@ -68,7 +69,7 @@ from app.web.session import (
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
-SECURE_COOKIES = (APP_ENV in ("production", "prod"))
+SECURE_COOKIES = (APP_ENV in ("production", "prod")) or (os.getenv("SECURE_COOKIES", "").strip().lower() in ("true", "1"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Jinja2 globals

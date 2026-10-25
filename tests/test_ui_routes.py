@@ -427,3 +427,160 @@ def test_session_ttl_cleanup():
         _demo_store[token]["last_accessed_at"] = time.time() - 8000
         _cleanup_expired_sessions_locked()
         assert token not in _demo_store
+
+
+# ── 14. Health Check Endpoints ───────────────────────────────────────────────
+
+def test_health_and_healthz_endpoints(client):
+    """Verify operational health endpoints return 200 healthy status."""
+    for path in ("/health", "/healthz"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "healthy"
+        assert data["service"] == "vendortrust"
+        assert "mode" in data
+
+
+# ── 15. Fresh-Browser End-to-End Walkthrough ─────────────────────────────────
+
+def test_fresh_browser_complete_walkthrough(client):
+    """
+    Simulates a brand new visitor in a fresh browser session:
+    1. Visits landing page.
+    2. Initializes demo session.
+    3. Views inbox.
+    4. Ingests invoice proposing changed payee -> HELD.
+    5. Issues challenge -> verifies in simulated mailbox -> approves v2.
+    6. Creates payment -> approves payment -> executes mock payout.
+    7. Verifies audit trail.
+    8. Resets demo.
+    """
+    # 1. Landing page
+    r_landing = client.get("/")
+    assert r_landing.status_code == 200
+    assert "VendorTrust" in r_landing.text
+
+    # 2. Start demo
+    r_start = client.post("/start-demo", follow_redirects=False)
+    assert r_start.status_code == 303
+    cookies = {"demo_session": r_start.cookies.get("demo_session")}
+    assert cookies["demo_session"] is not None
+
+    # 3. View inbox
+    r_inbox = client.get("/inbox", cookies=cookies)
+    assert r_inbox.status_code == 200
+    assert "Acme Design Labs" in r_inbox.text
+
+    # Extract CSRF token
+    csrf = _get_csrf(cookies)
+    assert csrf is not None
+
+    # 4. Ingest an invoice proposing payee change
+    r_intake = client.post(
+        "/inbox/submit",
+        data={
+            "csrf_token": csrf,
+            "document_text": "Please remit all future invoice payments to our updated accounting address: new-accounts@acme-design.test",
+            "source_type": "email_text",
+            "use_ai": "0",
+        },
+        cookies=cookies,
+    )
+    assert r_intake.status_code == 200
+    assert "HOLD" in r_intake.text or "HELD" in r_intake.text
+
+    # Find the created case ID
+    m = re.search(r"/cases/([a-f0-9\-]{36})", r_intake.text)
+    assert m, "No case ID found in intake result"
+    case_id = m.group(1)
+
+    # 5. Issue verification challenge
+    r_challenge = client.post(
+        f"/cases/{case_id}/issue-challenge",
+        data={"csrf_token": csrf},
+        cookies=cookies,
+        follow_redirects=True,
+    )
+    assert r_challenge.status_code == 200
+
+    # 6. Check simulated mailbox to retrieve plaintext OTP
+    r_mailbox = client.get(f"/cases/{case_id}/vendor-mailbox", cookies=cookies)
+    assert r_mailbox.status_code == 200
+    token_match = re.search(r'font-size:1\.8rem[^>]+>([^\s<]{6,})<', r_mailbox.text)
+    assert token_match, "No OTP token found in simulated vendor mailbox"
+    otp_token = token_match.group(1).strip()
+
+    # 7. Verify token
+    r_verify = client.post(
+        f"/cases/{case_id}/verify",
+        data={"csrf_token": csrf, "submitted_token": otp_token},
+        cookies=cookies,
+        follow_redirects=True,
+    )
+    assert r_verify.status_code == 200
+    assert "VENDOR_CONFIRMED" in r_verify.text
+
+    # 8. Approver Ravi approves change -> activates v2
+    r_approve = client.post(
+        f"/cases/{case_id}/approve",
+        data={"csrf_token": csrf},
+        cookies=cookies,
+        follow_redirects=True,
+    )
+    assert r_approve.status_code == 200
+    assert "VERSION_ACTIVATED" in r_approve.text or "approved" in r_approve.text.lower()
+
+    # 9. Create payment intent ($1.00 USD = 100 minor units)
+    payment_data = {
+        "csrf_token": csrf,
+        "invoice_reference": "INV-WALKTHROUGH-001",
+        "amount_minor": "100",
+        "currency": "USD",
+    }
+    r_pay_create = client.post(
+        "/payments/create",
+        data=payment_data,
+        cookies=cookies,
+        follow_redirects=True,
+    )
+    assert r_pay_create.status_code == 200
+    pay_match = re.search(r'/payments/([a-f0-9\-]{36})', r_pay_create.text)
+    assert pay_match, "Payment intent ID not found"
+    payment_id = pay_match.group(1)
+
+    # 10. Approver Ravi approves payment intent
+    r_pay_approve = client.post(
+        f"/payments/{payment_id}/approve",
+        data={"csrf_token": csrf},
+        cookies=cookies,
+        follow_redirects=True,
+    )
+    assert r_pay_approve.status_code == 200
+
+    # 11. Execute mock payout
+    r_pay_exec = client.post(
+        f"/payments/{payment_id}/execute",
+        data={"csrf_token": csrf},
+        cookies=cookies,
+        follow_redirects=True,
+    )
+    assert r_pay_exec.status_code == 200
+    assert "SETTLED" in r_pay_exec.text or "SUCCESS" in r_pay_exec.text
+
+    # 12. Check audit trail
+    r_audit = client.get("/audit", cookies=cookies)
+    assert r_audit.status_code == 200
+    assert "VERSION_ACTIVATED" in r_audit.text
+
+    # 13. Reset demo
+    r_reset = client.post(
+        "/reset-demo",
+        data={"csrf_token": csrf},
+        cookies=cookies,
+        follow_redirects=False,
+    )
+    assert r_reset.status_code == 303
+    new_cookie = r_reset.cookies.get("demo_session")
+    assert new_cookie != cookies["demo_session"]
+

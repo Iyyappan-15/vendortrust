@@ -1,0 +1,19 @@
+{
+  "test_run_id": "gate2_run_20261025_b5d2d5c0",
+  "created_at_utc": "2026-10-25T13:40:14Z",
+  "updated_at_utc": "2026-10-25T13:40:14Z",
+  "vendor_id": "4ad62f5d-fd3e-41ff-bb7e-b5b60d7ec6db",
+  "vendor_name": "Acme Design Labs",
+  "v1_version_id": "b23aeaae-94dd-416f-b83e-724aa9a7b22e",
+  "v2_version_id": "08433c5b-dac5-4de9-9ca7-18cca2d584e2",
+  "payee_change_case_id": "9c6951d5-0fb6-4c4d-b14d-fed398faf872",
+  "payment_intent_id": "09b81fbe-b927-4b28-a94f-1f09cc27cca2",
+  "payout_attempt_id": "3a64d4cf-e0b7-4f80-804d-1cbe46339577",
+  "sender_batch_id": "vt_batch_b5d2d5c0a093",
+  "payout_batch_id": "BFLWZHMJWV9MC",
+  "payout_item_id": "ZHUA56M7XGLUL",
+  "amount_minor": 100,
+  "currency": "USD",
+  "status": "SUCCESS",
+  "payment_intent_state": "SETTLED"
+}
