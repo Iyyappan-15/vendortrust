@@ -24,7 +24,7 @@ from app.services.payouts import submit_approved_payout
 
 
 def test_approval_cryptographic_parameter_binding(db_session, seeded_env):
-    """Approval binds exact vendor version, recipient, amount, currency, and digest."""
+    """Approval binds exact vendor version, recipient, amount, currency, invoice reference, and digest."""
     asha = seeded_env["asha"]
     ravi = seeded_env["ravi"]
     vendor = seeded_env["vendor"]
@@ -50,6 +50,7 @@ def test_approval_cryptographic_parameter_binding(db_session, seeded_env):
     assert approval.bound_recipient == v1.paypal_recipient
     assert approval.bound_amount_minor == 10000
     assert approval.bound_currency == "USD"
+    assert approval.bound_invoice_reference == "INV-SEC-01"
     assert approval.requester_id == asha.id
     assert approval.approver_id == ravi.id
     assert len(approval.digest) == 64
@@ -154,4 +155,72 @@ def test_tampered_approval_digest_refused(db_session, seeded_env):
     db_session.flush()
 
     with pytest.raises(SecurityViolationError, match="digest verification failed|Mismatched payment intent"):
+        submit_approved_payout(db_session, payment_intent_id=intent.id)
+
+
+def test_cross_intent_approval_reuse_refused(db_session, seeded_env):
+    """
+    An approval granted for Intent A cannot be attached to Intent B,
+    even if amount, currency, and vendor are identical.
+    """
+    asha = seeded_env["asha"]
+    ravi = seeded_env["ravi"]
+    vendor = seeded_env["vendor"]
+
+    intent_a = create_payment_intent(
+        session=db_session,
+        vendor_id=vendor.id,
+        invoice_reference="INV-A",
+        amount_minor=2000,
+        currency="USD",
+        requester_id=asha.id,
+    )
+    approval_a = approve_payment_intent(
+        session=db_session,
+        payment_intent_id=intent_a.id,
+        approver_id=ravi.id,
+    )
+
+    # Attacker creates Intent B for same amount and tries to reuse approval_a
+    intent_b = create_payment_intent(
+        session=db_session,
+        vendor_id=vendor.id,
+        invoice_reference="INV-B",
+        amount_minor=2000,
+        currency="USD",
+        requester_id=asha.id,
+    )
+    intent_b.state = "APPROVED"
+    intent_b.approval_id = approval_a.id  # Reusing approval from Intent A
+    db_session.flush()
+
+    with pytest.raises(SecurityViolationError, match="Cross-intent approval reuse detected"):
+        submit_approved_payout(db_session, payment_intent_id=intent_b.id)
+
+
+def test_approval_digest_detects_invoice_reference_tampering(db_session, seeded_env):
+    """Modifying the invoice reference on an intent after approval breaks digest verification."""
+    asha = seeded_env["asha"]
+    ravi = seeded_env["ravi"]
+    vendor = seeded_env["vendor"]
+
+    intent = create_payment_intent(
+        session=db_session,
+        vendor_id=vendor.id,
+        invoice_reference="INV-LEGIT-100",
+        amount_minor=4000,
+        currency="USD",
+        requester_id=asha.id,
+    )
+    approve_payment_intent(
+        session=db_session,
+        payment_intent_id=intent.id,
+        approver_id=ravi.id,
+    )
+
+    # Attacker tampers with invoice reference
+    intent.invoice_reference = "INV-FRAUD-999"
+    db_session.flush()
+
+    with pytest.raises(SecurityViolationError, match="digest verification failed|Mismatched invoice reference"):
         submit_approved_payout(db_session, payment_intent_id=intent.id)

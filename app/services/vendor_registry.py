@@ -14,6 +14,14 @@ from app.services.exceptions import SecurityViolationError, VendorFrozenError
 REQUESTER_ASHA_ID = "user_requester_asha_001"
 APPROVER_RAVI_ID = "user_approver_ravi_002"
 
+VALID_INDEPENDENT_PROOF_TYPES = {
+    "CONTRACT_ON_FILE",
+    "OFFICIAL_BANK_STATEMENT",
+    "INDEPENDENT_PHONE_VERIFIED",
+    "VENDOR_PORTAL_REGISTRATION_DOC",
+    "PRE_EXISTING_MASTER_AGREEMENT",
+}
+
 
 def seed_default_users(session: Session) -> Tuple[User, User]:
     """
@@ -69,20 +77,40 @@ def register_initial_vendor(
     initial_paypal_recipient: str,
     requester_id: str,
     approver_id: str,
+    independent_contact_proof_type: str,
+    proof_reference: str,
     vendor_id: Optional[str] = None,
 ) -> Tuple[Vendor, VendorVersion]:
     """
     Initial onboarding of a trusted vendor.
-    Enforces separation of duties: requester cannot be the approver who activates the vendor.
-    The trusted contact is READ-ONLY in MVP and recorded as the baseline for all future challenges.
+    Security Invariants:
+    1. Separation of duties: requester and approver MUST be distinct individuals.
+    2. A self-declared contact alone does not establish trust. Independent contact
+       proof type and reference are mandatory.
+    3. Approver must hold the APPROVER role.
+    4. Creates immutable VendorVersion 1 with active pointer.
+    5. Contact is read-only in MVP.
     """
     if requester_id == approver_id:
         raise SecurityViolationError("Requester and approver must be distinct individuals during vendor onboarding.")
 
+    # Validate independent proof metadata
+    clean_proof_type = independent_contact_proof_type.strip().upper() if independent_contact_proof_type else ""
+    clean_proof_ref = proof_reference.strip() if proof_reference else ""
+
+    if not clean_proof_type or clean_proof_type not in VALID_INDEPENDENT_PROOF_TYPES:
+        raise SecurityViolationError(
+            f"Invalid independent contact proof type '{independent_contact_proof_type}'. "
+            f"Must be one of: {sorted(VALID_INDEPENDENT_PROOF_TYPES)}"
+        )
+
+    if not clean_proof_ref or len(clean_proof_ref) < 3:
+        raise SecurityViolationError("A substantive independent proof reference (e.g. contract ID or document ref) is required.")
+
     # Validate approver has APPROVER role
     approver = session.query(User).filter_by(id=approver_id).first()
     if not approver or approver.role != "APPROVER":
-        raise SecurityViolationError(f"User {approver_id} does not hold the APPROVER role.")
+        raise SecurityViolationError(f"User '{approver_id}' does not hold the APPROVER role.")
 
     vid = vendor_id or str(uuid.uuid4())
     version_id = str(uuid.uuid4())
@@ -115,7 +143,6 @@ def register_initial_vendor(
         created_by_user_id=requester_id,
         approved_by_user_id=approver_id,
         created_at=utcnow(),
-        superseded_at=None,
         content_digest=digest,
     )
     session.add(v1)
@@ -126,7 +153,7 @@ def register_initial_vendor(
 
     record_audit_event(
         session=session,
-        event_type="VENDOR_ONBOARDED",
+        event_type="VENDOR_ONBOARDED_INDEPENDENT_PROOF",
         actor_id=approver_id,
         entity_type="VENDOR",
         entity_id=vid,
@@ -139,6 +166,9 @@ def register_initial_vendor(
             "version_id": version_id,
             "requester_id": requester_id,
             "approver_id": approver_id,
+            "independent_contact_proof_type": clean_proof_type,
+            "proof_reference": clean_proof_ref,
+            "security_disclaimer": "Internal segregation of duties established; not external cryptographic identity proof.",
         },
     )
 

@@ -1,5 +1,5 @@
 """
-app/services/challenges.py — Payee Change Cases & Out-of-Band Challenge Protocol
+app/services/challenges.py — Payee Change Cases & Keyed HMAC Challenge Protocol
 """
 
 import datetime
@@ -9,6 +9,7 @@ import secrets
 import uuid
 from typing import Optional, Tuple
 from sqlalchemy.orm import Session
+from app.config import SECRET_KEY
 from app.models import PayeeChangeCase, VerificationChallenge, Vendor, VendorVersion, utcnow
 from app.services.audit import record_audit_event
 from app.services.exceptions import (
@@ -31,9 +32,19 @@ def to_naive_utc(dt: datetime.datetime) -> datetime.datetime:
     return dt
 
 
-def hash_token(token: str) -> str:
-    """Compute deterministic SHA-256 hash of a plaintext verification token."""
-    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+def compute_challenge_token_hmac(
+    challenge_id: str,
+    case_id: str,
+    proposed_recipient: str,
+    token: str,
+) -> str:
+    """
+    Compute cryptographic HMAC-SHA256 of verification token.
+    Binds the token to the exact challenge ID, case ID, proposed recipient,
+    and server-side SECRET_KEY held strictly outside the database.
+    """
+    message = f"{challenge_id}:{case_id}:{proposed_recipient.strip().lower()}:{token.strip()}".encode("utf-8")
+    return hmac.new(SECRET_KEY.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def compute_candidate_digest(
@@ -70,7 +81,7 @@ def create_payee_change_case(
 
     clean_proposed = proposed_recipient.strip().lower()
 
-    # If the requested recipient is identical to active version, no change case needed
+    # If requested recipient is identical to active version, no change case needed
     if clean_proposed == active_version.paypal_recipient.lower():
         raise ValueError("Proposed recipient matches existing active vendor recipient.")
 
@@ -123,7 +134,7 @@ def issue_verification_challenge(
     """
     Issues an out-of-band verification challenge bound to the case.
     The challenge token is dispatched ONLY to the previously established trusted contact.
-    The database stores ONLY the token hash, never the plaintext token.
+    Stores ONLY keyed HMAC-SHA256, never plaintext or bare hashes.
     Returns (challenge_record, plaintext_token_for_dispatch).
     """
     case = session.query(PayeeChangeCase).filter_by(id=case_id).first()
@@ -136,9 +147,17 @@ def issue_verification_challenge(
     vendor = get_vendor(session, case.vendor_id)
     check_vendor_active(vendor)
 
-    # Generate high-entropy unguessable token (e.g. 32-byte urlsafe string or 6-digit cryptographic OTP)
+    challenge_id = str(uuid.uuid4())
+    # Generate high-entropy unguessable token
     plaintext_token = secrets.token_urlsafe(24)
-    token_digest = hash_token(plaintext_token)
+
+    # Keyed HMAC construction bound to challenge_id, case_id, and proposed_recipient
+    token_hmac = compute_challenge_token_hmac(
+        challenge_id=challenge_id,
+        case_id=case.id,
+        proposed_recipient=case.proposed_recipient,
+        token=plaintext_token,
+    )
 
     candidate_digest = compute_candidate_digest(
         case_id=case.id,
@@ -147,7 +166,6 @@ def issue_verification_challenge(
         proposed_recipient=case.proposed_recipient,
     )
 
-    challenge_id = str(uuid.uuid4())
     expires_at = utcnow() + datetime.timedelta(seconds=expiry_seconds)
 
     challenge = VerificationChallenge(
@@ -157,7 +175,7 @@ def issue_verification_challenge(
         bound_base_version_id=case.base_version_id,
         bound_proposed_recipient=case.proposed_recipient,
         bound_candidate_digest=candidate_digest,
-        token_hash=token_digest,
+        token_hash=token_hmac,
         delivery_channel="TRUSTED_EMAIL",
         delivery_destination=vendor.trusted_contact_email,  # Strictly pre-existing contact
         attempts=0,
@@ -185,6 +203,7 @@ def issue_verification_challenge(
             "case_id": case.id,
             "destination": vendor.trusted_contact_email,
             "expires_at": expires_at.isoformat(),
+            "hmac_binding": "challenge_id+case_id+proposed_recipient",
         },
     )
 
@@ -199,8 +218,8 @@ def verify_vendor_confirmation(
     """
     Vendor enters token to confirm they requested the recipient change.
     Requirements:
-    - Verifies token hash with constant-time equality.
-    - Single-use: marks used_at.
+    - Verifies keyed HMAC-SHA256 with constant-time equality.
+    - Single-use: marks used_at atomically.
     - Rate limits: rejects if max attempts exceeded.
     - Transitions case to VENDOR_CONFIRMED.
     - Does NOT activate the version! A separate approver is still required.
@@ -252,15 +271,20 @@ def verify_vendor_confirmation(
 
     challenge.attempts += 1
 
-    # Verify constant-time token hash match
-    submitted_hash = hash_token(submitted_token)
-    if not hmac.compare_digest(submitted_hash, challenge.token_hash):
+    # Verify constant-time keyed HMAC match
+    submitted_hmac = compute_challenge_token_hmac(
+        challenge_id=challenge.id,
+        case_id=case.id,
+        proposed_recipient=case.proposed_recipient,
+        token=submitted_token,
+    )
+    if not hmac.compare_digest(submitted_hmac, challenge.token_hash):
         session.flush()
         if challenge.attempts >= challenge.max_attempts:
             raise MaxAttemptsExceededError("Maximum verification attempts exceeded. Challenge locked.")
         raise InvalidChallengeError("Invalid verification token.")
 
-    # Verification successful: consume token
+    # Verification successful: consume token atomically
     challenge.used_at = utcnow()
     case.state = "VENDOR_CONFIRMED"
     case.updated_at = utcnow()

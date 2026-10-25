@@ -29,6 +29,40 @@ def test_self_approval_blocked_on_vendor_onboarding(db_session, seeded_env):
             initial_paypal_recipient="rogue@example.test",
             requester_id=asha.id,
             approver_id=asha.id,  # Self-approval attempt
+            independent_contact_proof_type="CONTRACT_ON_FILE",
+            proof_reference="DOC-999",
+        )
+
+
+def test_onboarding_requires_independent_proof_metadata(db_session, seeded_env):
+    """First-time onboarding without independent contact proof is strictly refused."""
+    asha = seeded_env["asha"]
+    ravi = seeded_env["ravi"]
+
+    # Missing proof type
+    with pytest.raises(SecurityViolationError, match="Invalid independent contact proof type"):
+        register_initial_vendor(
+            session=db_session,
+            name="Unverified Vendor",
+            trusted_contact_email="unverified@example.test",
+            initial_paypal_recipient="unverified@example.test",
+            requester_id=asha.id,
+            approver_id=ravi.id,
+            independent_contact_proof_type="",
+            proof_reference="DOC-123",
+        )
+
+    # Missing proof reference
+    with pytest.raises(SecurityViolationError, match="substantive independent proof reference"):
+        register_initial_vendor(
+            session=db_session,
+            name="Unverified Vendor",
+            trusted_contact_email="unverified@example.test",
+            initial_paypal_recipient="unverified@example.test",
+            requester_id=asha.id,
+            approver_id=ravi.id,
+            independent_contact_proof_type="CONTRACT_ON_FILE",
+            proof_reference="",
         )
 
 

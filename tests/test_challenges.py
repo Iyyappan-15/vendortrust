@@ -6,8 +6,8 @@ import datetime
 import pytest
 from app.models import PayeeChangeCase, VerificationChallenge, utcnow
 from app.services.challenges import (
+    compute_challenge_token_hmac,
     create_payee_change_case,
-    hash_token,
     issue_verification_challenge,
     record_vendor_rejection_compromise,
     verify_vendor_confirmation,
@@ -20,8 +20,8 @@ from app.services.exceptions import (
 )
 
 
-def test_challenge_stores_only_token_hash_not_plaintext(db_session, seeded_env):
-    """The database must never contain the plaintext verification token."""
+def test_challenge_stores_only_keyed_hmac_not_plaintext(db_session, seeded_env):
+    """The database must never contain the plaintext verification token or bare hash."""
     asha = seeded_env["asha"]
     vendor = seeded_env["vendor"]
 
@@ -38,7 +38,13 @@ def test_challenge_stores_only_token_hash_not_plaintext(db_session, seeded_env):
 
     # Verify database record
     db_record = db_session.query(VerificationChallenge).filter_by(id=challenge.id).first()
-    assert db_record.token_hash == hash_token(plaintext_token)
+    expected_hmac = compute_challenge_token_hmac(
+        challenge_id=challenge.id,
+        case_id=case.id,
+        proposed_recipient=case.proposed_recipient,
+        token=plaintext_token,
+    )
+    assert db_record.token_hash == expected_hmac
     assert plaintext_token not in db_record.token_hash
     # Destination must be strictly the pre-existing trusted contact
     assert db_record.delivery_destination == vendor.trusted_contact_email
@@ -65,7 +71,7 @@ def test_challenge_single_use_enforcement(db_session, seeded_env):
     assert updated_case.state == "VENDOR_CONFIRMED"
 
     # Second use fails
-    with pytest.raises(Exception):  # Either invalid state transition or already consumed
+    with pytest.raises(Exception):
         verify_vendor_confirmation(db_session, case.id, plaintext_token)
 
 
@@ -187,7 +193,7 @@ def test_vendor_rejection_compromise_freezes_vendor_permanently(db_session, seed
     db_session.refresh(challenge)
     assert challenge.rejected_at is not None
 
-    # Verifying the token now fails
+    # Verifying the token now fails because vendor is frozen
     with pytest.raises(VendorFrozenError):
         verify_vendor_confirmation(db_session, case.id, token)
 
@@ -201,3 +207,29 @@ def test_vendor_rejection_compromise_freezes_vendor_permanently(db_session, seed
             source_reference="INV-NEW",
             requester_id=asha.id,
         )
+
+
+def test_keyed_hmac_prevents_offline_dictionary_attacks(db_session, seeded_env):
+    """
+    Even if an attacker possesses the token and recipient, without the server SECRET_KEY,
+    they cannot generate a valid HMAC or forge verification.
+    """
+    from app.config import SECRET_KEY
+    import hmac, hashlib
+
+    token = "test_otp_123456"
+    case_id = "case_fake_001"
+    challenge_id = "chal_fake_001"
+    proposed = "vendor-new@example.test"
+
+    real_hmac = compute_challenge_token_hmac(challenge_id, case_id, proposed, token)
+
+    # Attacker guessing with their own key
+    attacker_key = "attacker_secret_key"
+    attacker_hmac = hmac.new(
+        attacker_key.encode(),
+        f"{challenge_id}:{case_id}:{proposed}:{token}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert real_hmac != attacker_hmac

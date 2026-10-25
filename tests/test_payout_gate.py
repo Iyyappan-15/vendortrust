@@ -193,3 +193,114 @@ def test_recipient_injection_via_tampered_approval_bound_recipient_refused(db_se
     with pytest.raises(SecurityViolationError):
         submit_approved_payout(db_session, payment_intent_id=intent.id)
 
+
+def test_payout_reservation_committed_before_provider_dispatch(db_session, seeded_env):
+    """
+    CRITICAL INVARIANT 4:
+    The payout attempt in RESERVED state and unique sender_batch_id MUST be committed
+    to the database BEFORE any network dispatch to the payment provider.
+    """
+    asha = seeded_env["asha"]
+    ravi = seeded_env["ravi"]
+    vendor = seeded_env["vendor"]
+
+    intent = create_payment_intent(
+        session=db_session,
+        vendor_id=vendor.id,
+        invoice_reference="INV-PRECOMMIT",
+        amount_minor=750,
+        currency="USD",
+        requester_id=asha.id,
+    )
+    approve_payment_intent(db_session, intent.id, approver_id=ravi.id)
+
+    verified_in_transit = {"verified": False}
+
+    def inspect_db_during_dispatch(sender_batch_id: str, sender_item_id: str):
+        # Query DB in the middle of provider dispatch
+        attempt_record = db_session.query(PayoutAttempt).filter_by(sender_batch_id=sender_batch_id).first()
+        assert attempt_record is not None
+        assert attempt_record.state == "RESERVED"
+        assert attempt_record.amount_minor == 750
+        verified_in_transit["verified"] = True
+
+    inspecting_provider = MockPayoutProvider(desired_item_status="SUCCESS", on_dispatch=inspect_db_during_dispatch)
+    attempt = submit_approved_payout(
+        session=db_session,
+        payment_intent_id=intent.id,
+        provider=inspecting_provider,
+    )
+
+    assert verified_in_transit["verified"] is True
+    assert attempt.state == "SUCCESS"
+
+
+def test_simultaneous_payout_requests_prevent_double_spend(db_session, seeded_env):
+    """
+    If a payout attempt is already in RESERVED state (e.g. concurrent thread),
+    a second submission returns the existing reserved attempt rather than creating a second batch.
+    """
+    asha = seeded_env["asha"]
+    ravi = seeded_env["ravi"]
+    vendor = seeded_env["vendor"]
+
+    intent = create_payment_intent(
+        session=db_session,
+        vendor_id=vendor.id,
+        invoice_reference="INV-CONCURRENT",
+        amount_minor=1200,
+        currency="USD",
+        requester_id=asha.id,
+    )
+    approve_payment_intent(db_session, intent.id, approver_id=ravi.id)
+
+    # Simulate an in-flight RESERVED attempt
+    attempt_1 = submit_approved_payout(
+        session=db_session,
+        payment_intent_id=intent.id,
+        provider=MockPayoutProvider(desired_item_status="PENDING"),
+    )
+
+    # Calling again while PENDING/RESERVED returns the existing attempt (idempotent guard)
+    attempt_2 = submit_approved_payout(
+        session=db_session,
+        payment_intent_id=intent.id,
+        provider=MockPayoutProvider(desired_item_status="SUCCESS"),
+    )
+
+    assert attempt_1.id == attempt_2.id
+    assert attempt_1.sender_batch_id == attempt_2.sender_batch_id
+
+
+def test_provider_network_crash_transitions_to_reconcile_required(db_session, seeded_env):
+    """
+    If the provider throws an unhandled network exception during dispatch,
+    the attempt safely catches it, persists RECONCILE_REQUIRED, and preserves sender_batch_id.
+    """
+    asha = seeded_env["asha"]
+    ravi = seeded_env["ravi"]
+    vendor = seeded_env["vendor"]
+
+    intent = create_payment_intent(
+        session=db_session,
+        vendor_id=vendor.id,
+        invoice_reference="INV-CRASH",
+        amount_minor=600,
+        currency="USD",
+        requester_id=asha.id,
+    )
+    approve_payment_intent(db_session, intent.id, approver_id=ravi.id)
+
+    class CrashingProvider:
+        def execute_payout(self, sender_batch_id, sender_item_id, recipient_email, amount_minor, currency):
+            raise ConnectionResetError("Remote server closed connection unexpectedly")
+
+    attempt = submit_approved_payout(
+        session=db_session,
+        payment_intent_id=intent.id,
+        provider=CrashingProvider(),
+    )
+
+    assert attempt.state == "RECONCILE_REQUIRED"
+    assert intent.state == "RECONCILE_REQUIRED"
+    assert "Remote server closed connection" in attempt.provider_response_redacted

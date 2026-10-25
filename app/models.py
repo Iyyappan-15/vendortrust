@@ -4,7 +4,7 @@ app/models.py — Core SQLAlchemy Models for VendorTrust
 Implements the nine core tables:
 1. users
 2. vendors
-3. vendor_versions
+3. vendor_versions (strictly immutable)
 4. payee_change_cases
 5. verification_challenges
 6. approvals
@@ -25,9 +25,11 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Index,
+    event,
 )
 from sqlalchemy.orm import relationship
 from app.db import Base
+from app.services.exceptions import SecurityViolationError
 
 
 def utcnow() -> datetime.datetime:
@@ -58,6 +60,7 @@ class Vendor(Base):
     """
     Vendor master entity.
     The trusted contact is READ-ONLY in MVP and immutable after bootstrap.
+    Active version is tracked via active_version_id pointer.
     """
     __tablename__ = "vendors"
 
@@ -84,8 +87,8 @@ class Vendor(Base):
 class VendorVersion(Base):
     """
     Immutable vendor version records.
-    Never update or delete an existing version record. When a change is approved,
-    version N+1 is created transactionally and version N is superseded.
+    Genuinely append-only. NEVER updated or deleted.
+    Active status is determined solely by vendor.active_version_id pointer.
     """
     __tablename__ = "vendor_versions"
 
@@ -98,7 +101,6 @@ class VendorVersion(Base):
     created_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     approved_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
-    superseded_at = Column(DateTime(timezone=True), nullable=True)
     content_digest = Column(String(64), nullable=False)  # SHA-256 of version content
 
     __table_args__ = (
@@ -111,6 +113,17 @@ class VendorVersion(Base):
 
     def __repr__(self) -> str:
         return f"<VendorVersion v{self.version_number} for Vendor {self.vendor_id} -> {self.paypal_recipient}>"
+
+
+# Enforce strict immutability at the ORM level
+@event.listens_for(VendorVersion, "before_update")
+def _vendor_version_before_update(mapper, connection, target):
+    raise SecurityViolationError(f"VendorVersion records are strictly immutable. Update forbidden on version '{target.id}'.")
+
+
+@event.listens_for(VendorVersion, "before_delete")
+def _vendor_version_before_delete(mapper, connection, target):
+    raise SecurityViolationError(f"VendorVersion records cannot be deleted. Deletion forbidden on version '{target.id}'.")
 
 
 class PayeeChangeCase(Base):
@@ -150,7 +163,7 @@ class PayeeChangeCase(Base):
 class VerificationChallenge(Base):
     """
     Out-of-band verification challenge dispatched strictly to the pre-existing
-    trusted contact email. Stores ONLY token hashes, never plaintext tokens.
+    trusted contact email. Stores ONLY token hashes (HMAC-SHA256), never plaintext tokens.
     """
     __tablename__ = "verification_challenges"
 
@@ -160,7 +173,7 @@ class VerificationChallenge(Base):
     bound_base_version_id = Column(String(36), ForeignKey("vendor_versions.id"), nullable=False)
     bound_proposed_recipient = Column(String(255), nullable=False)
     bound_candidate_digest = Column(String(64), nullable=False)
-    token_hash = Column(String(64), nullable=False, index=True)  # SHA-256 of token
+    token_hash = Column(String(64), nullable=False, index=True)  # HMAC-SHA256 of token
     delivery_channel = Column(String(50), default="TRUSTED_EMAIL", nullable=False)
     delivery_destination = Column(String(255), nullable=False)  # Must match vendor.trusted_contact_email
     attempts = Column(Integer, default=0, nullable=False)
@@ -179,8 +192,8 @@ class VerificationChallenge(Base):
 class Approval(Base):
     """
     Exact transaction-bound or change-case approval.
-    Binds vendor version, recipient, amount, currency, and expiration.
-    Enforces distinct requester and approver.
+    Binds vendor version, recipient, amount, currency, invoice reference, and expiration.
+    Enforces distinct requester and approver. 1:1 binding to payment intent.
     """
     __tablename__ = "approvals"
 
@@ -191,6 +204,7 @@ class Approval(Base):
         String(36),
         ForeignKey("payment_intents.id", use_alter=True, name="fk_approval_payment_intent"),
         nullable=True,
+        unique=True,
     )
     requester_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     approver_id = Column(String(36), ForeignKey("users.id"), nullable=False)
@@ -199,7 +213,8 @@ class Approval(Base):
     bound_recipient = Column(String(255), nullable=False)
     bound_amount_minor = Column(Integer, nullable=True)  # None for change cases
     bound_currency = Column(String(3), nullable=True)
-    digest = Column(String(64), nullable=False)  # Cryptographic digest of approval parameters
+    bound_invoice_reference = Column(String(100), nullable=True)
+    digest = Column(String(64), nullable=False)  # Cryptographic digest of all approval parameters
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)

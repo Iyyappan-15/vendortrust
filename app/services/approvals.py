@@ -41,10 +41,14 @@ def compute_approval_digest(
     expires_at: datetime.datetime,
     bound_amount_minor: Optional[int] = None,
     bound_currency: Optional[str] = None,
+    bound_invoice_reference: Optional[str] = None,
     case_id: Optional[str] = None,
     payment_intent_id: Optional[str] = None,
 ) -> str:
-    """Compute cryptographic SHA-256 digest binding all critical approval parameters."""
+    """
+    Compute cryptographic SHA-256 digest binding all critical approval parameters.
+    Binds exact payment_intent_id and invoice_reference to prevent approval reuse across intents.
+    """
     raw = (
         f"{approval_type}:"
         f"{case_id or 'NONE'}:"
@@ -53,6 +57,7 @@ def compute_approval_digest(
         f"{bound_recipient.strip().lower()}:"
         f"{bound_amount_minor if bound_amount_minor is not None else 'NONE'}:"
         f"{bound_currency or 'NONE'}:"
+        f"{bound_invoice_reference or 'NONE'}:"
         f"{requester_id}:"
         f"{approver_id}:"
         f"{expires_at.isoformat()}"
@@ -72,8 +77,8 @@ def approve_payee_change_case(
     1. Separation of duties: requester CANNOT approve own change.
     2. Approver must have role 'APPROVER'.
     3. Case must be in 'VENDOR_CONFIRMED' state.
-    4. Atomically creates version N+1.
-    5. Supersedes version N.
+    4. Atomically creates version N+1 (strictly append-only, version N is NOT updated).
+    5. Updates vendor.active_version_id to N+1.
     6. Invalidates all pending payment intents and approvals bound to superseded version N.
     7. Transitions case to 'VERSION_ACTIVATED'.
     """
@@ -104,7 +109,7 @@ def approve_payee_change_case(
     if not base_version:
         raise ValueError(f"Base vendor version '{case.base_version_id}' not found.")
 
-    # Create new immutable VendorVersion N+1
+    # Create new immutable VendorVersion N+1 (append-only)
     new_version_number = base_version.version_number + 1
     new_version_id = str(uuid.uuid4())
     new_digest = compute_vendor_version_digest(
@@ -124,16 +129,12 @@ def approve_payee_change_case(
         created_by_user_id=case.requester_id,
         approved_by_user_id=approver_id,
         created_at=utcnow(),
-        superseded_at=None,
         content_digest=new_digest,
     )
     session.add(new_version)
-    session.flush()  # Insert new version before updating foreign key pointer!
+    session.flush()  # Insert new version before updating active pointer!
 
-    # Supersede version N
-    base_version.superseded_at = utcnow()
-
-    # Update Vendor active version pointer
+    # Update Vendor active version pointer (Historical versions are NEVER updated)
     vendor.active_version_id = new_version_id
     session.flush()
 
@@ -162,6 +163,7 @@ def approve_payee_change_case(
         bound_recipient=case.proposed_recipient.strip().lower(),
         bound_amount_minor=None,
         bound_currency=None,
+        bound_invoice_reference=None,
         digest=appr_digest,
         expires_at=expires_at,
         created_at=utcnow(),
@@ -227,6 +229,7 @@ def approve_payee_change_case(
             "new_recipient": case.proposed_recipient,
             "case_id": case.id,
             "invalidated_stale_intents_count": len(stale_intents),
+            "historical_immutability": "Historical vendor_versions rows remain unmodified",
         },
     )
 
@@ -247,6 +250,10 @@ def create_payment_intent(
     if amount_minor <= 0:
         raise ValueError("Amount must be a positive integer in minor units.")
 
+    clean_invoice_ref = invoice_reference.strip()
+    if not clean_invoice_ref:
+        raise ValueError("Invoice reference cannot be empty.")
+
     vendor = get_vendor(session, vendor_id)
     check_vendor_active(vendor)
 
@@ -259,7 +266,7 @@ def create_payment_intent(
         id=intent_id,
         vendor_id=vendor_id,
         vendor_version_id=active_version.id,
-        invoice_reference=invoice_reference.strip(),
+        invoice_reference=clean_invoice_ref,
         amount_minor=amount_minor,
         currency=currency.strip().upper(),
         requester_id=requester_id,
@@ -282,6 +289,7 @@ def create_payment_intent(
         details={
             "vendor_id": vendor_id,
             "vendor_version_id": active_version.id,
+            "invoice_reference": clean_invoice_ref,
             "amount_minor": amount_minor,
             "currency": currency,
             "recipient_snapshot": active_version.paypal_recipient,
@@ -303,7 +311,7 @@ def approve_payment_intent(
     2. Approver must hold APPROVER role.
     3. Vendor must be active (not frozen).
     4. Referenced vendor version must still be the current active version.
-    5. Approval cryptographically binds intent, vendor version, recipient, amount, currency, and expiry.
+    5. Approval cryptographically binds intent, vendor version, recipient, amount, currency, invoice_reference, and expiry.
     """
     intent = session.query(PaymentIntent).filter_by(id=payment_intent_id).first()
     if not intent:
@@ -335,8 +343,8 @@ def approve_payment_intent(
         )
 
     version = session.query(VendorVersion).filter_by(id=intent.vendor_version_id).first()
-    if not version or version.superseded_at is not None:
-        raise StaleVersionError(f"Cannot approve: Vendor version '{intent.vendor_version_id}' has been superseded.")
+    if not version or vendor.active_version_id != version.id:
+        raise StaleVersionError(f"Cannot approve: Vendor version '{intent.vendor_version_id}' is superseded.")
 
     approval_id = str(uuid.uuid4())
     expires_at = utcnow() + datetime.timedelta(seconds=expires_in_seconds)
@@ -350,6 +358,7 @@ def approve_payment_intent(
         expires_at=expires_at,
         bound_amount_minor=intent.amount_minor,
         bound_currency=intent.currency,
+        bound_invoice_reference=intent.invoice_reference,
         payment_intent_id=intent.id,
     )
 
@@ -365,6 +374,7 @@ def approve_payment_intent(
         bound_recipient=version.paypal_recipient.strip().lower(),
         bound_amount_minor=intent.amount_minor,
         bound_currency=intent.currency.strip().upper(),
+        bound_invoice_reference=intent.invoice_reference,
         digest=digest,
         expires_at=expires_at,
         created_at=utcnow(),
@@ -392,6 +402,7 @@ def approve_payment_intent(
             "bound_recipient": version.paypal_recipient,
             "amount_minor": intent.amount_minor,
             "currency": intent.currency,
+            "bound_invoice_reference": intent.invoice_reference,
         },
     )
     return approval

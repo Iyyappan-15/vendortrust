@@ -3,6 +3,7 @@ tests/test_versions.py — Tests for Vendor Version Immutability and Version Tra
 """
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from app.models import VendorVersion
 from app.services.approvals import approve_payee_change_case
@@ -11,18 +12,18 @@ from app.services.challenges import (
     issue_verification_challenge,
     verify_vendor_confirmation,
 )
+from app.services.exceptions import SecurityViolationError
 from app.services.vendor_registry import compute_vendor_version_digest
 
 
 def test_immutable_vendor_version_creation(db_session, seeded_env):
-    """Confirming and approving a payee change creates version N+1 and supersedes N."""
+    """Confirming and approving a payee change creates version N+1 without modifying N."""
     asha = seeded_env["asha"]
     ravi = seeded_env["ravi"]
     vendor = seeded_env["vendor"]
     v1 = seeded_env["v1"]
 
     assert v1.version_number == 1
-    assert v1.superseded_at is None
     assert vendor.active_version_id == v1.id
 
     # Create and confirm payee change case
@@ -51,13 +52,11 @@ def test_immutable_vendor_version_creation(db_session, seeded_env):
         vendor.id, 2, "verified-v2@example.test", vendor.trusted_contact_email
     )
 
-    # Version 1 remains intact, immutable, but marked superseded
+    # Version 1 remains 100% intact, immutable, and is no longer active
     assert v1.version_number == 1
     assert v1.paypal_recipient == "acme-pay@example.test"
-    assert v1.superseded_at is not None
-
-    # Vendor active pointer points to v2
     assert vendor.active_version_id == v2.id
+    assert vendor.active_version_id != v1.id
 
 
 def test_version_number_uniqueness_constraint(db_session, seeded_env):
@@ -81,3 +80,33 @@ def test_version_number_uniqueness_constraint(db_session, seeded_env):
 
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_direct_orm_modification_of_vendor_version_blocked(db_session, seeded_env):
+    """Attempting to mutate an existing VendorVersion row via ORM is blocked by immutability hooks."""
+    v1 = seeded_env["v1"]
+
+    v1.paypal_recipient = "malicious-overwrite@example.test"
+    with pytest.raises(SecurityViolationError, match="strictly immutable"):
+        db_session.flush()
+
+
+def test_direct_sql_modification_of_vendor_version_blocked_by_trigger(db_session, seeded_env):
+    """Attempting raw SQL UPDATE on vendor_versions is rejected by database trigger."""
+    v1 = seeded_env["v1"]
+
+    with pytest.raises(Exception, match="strictly immutable|VendorVersion"):
+        db_session.execute(
+            text("UPDATE vendor_versions SET paypal_recipient = 'injected@example.test' WHERE id = :vid"),
+            {"vid": v1.id},
+        )
+        db_session.commit()
+
+
+def test_direct_deletion_of_vendor_version_blocked(db_session, seeded_env):
+    """Attempting to delete a VendorVersion row via ORM is blocked."""
+    v1 = seeded_env["v1"]
+
+    db_session.delete(v1)
+    with pytest.raises(SecurityViolationError, match="cannot be deleted"):
+        db_session.flush()

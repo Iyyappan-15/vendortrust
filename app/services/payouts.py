@@ -37,9 +37,10 @@ class MockPayoutProvider:
     Simulated payout provider for testing and deterministic validation.
     No network requests made. Prominently records mock execution.
     """
-    def __init__(self, desired_item_status: str = "SUCCESS", simulate_timeout: bool = False):
+    def __init__(self, desired_item_status: str = "SUCCESS", simulate_timeout: bool = False, on_dispatch=None):
         self.desired_item_status = desired_item_status
         self.simulate_timeout = simulate_timeout
+        self.on_dispatch = on_dispatch  # Hook to inspect DB state during network transit
 
     def execute_payout(
         self,
@@ -49,6 +50,9 @@ class MockPayoutProvider:
         amount_minor: int,
         currency: str,
     ) -> Dict[str, Any]:
+        if self.on_dispatch:
+            self.on_dispatch(sender_batch_id, sender_item_id)
+
         if self.simulate_timeout:
             return {
                 "success": False,
@@ -93,11 +97,12 @@ def submit_approved_payout(
     1. Accepts ONLY payment_intent_id.
     2. Recipient email is NEVER accepted from caller or external input.
        It is resolved strictly from the immutable VendorVersion record!
-    3. Amount and currency are read strictly from the approved intent.
+    3. Amount, currency, and invoice reference are read strictly from the approved intent.
     4. Validates approval signature/digest, expiration, and invalidation status.
     5. Checks vendor status (must not be FROZEN).
     6. Ensures version is still the active version of the vendor.
-    7. Persists PayoutAttempt with unique batch/item IDs BEFORE provider dispatch (idempotency).
+    7. DURABLE PRE-COMMIT: Persists PayoutAttempt with unique batch/item IDs and
+       COMMITS to the database BEFORE network submission (idempotency key durable).
     """
     # Step 1: Load payment intent
     intent = session.query(PaymentIntent).filter_by(id=payment_intent_id).first()
@@ -113,21 +118,29 @@ def submit_approved_payout(
         .filter_by(payment_intent_id=intent.id)
         .first()
     )
-    if existing_attempt and existing_attempt.state == "SUCCESS":
-        raise DuplicatePayoutError(f"Payment intent '{intent.id}' has already been successfully paid out.")
+    if existing_attempt:
+        if existing_attempt.state == "SUCCESS":
+            raise DuplicatePayoutError(f"Payment intent '{intent.id}' has already been successfully paid out.")
+        if existing_attempt.state in ("RESERVED", "SUBMITTED", "PENDING", "PROCESSING"):
+            # Return existing attempt to enforce idempotency
+            return existing_attempt
 
     if intent.state != "APPROVED":
         raise InvalidStateTransitionError(
             f"Cannot execute payout for intent '{payment_intent_id}': state is '{intent.state}', expected 'APPROVED'."
         )
 
-    # Step 2: Load approval
+    # Step 2: Load and validate approval
     if not intent.approval_id:
         raise SecurityViolationError("Payment intent lacks an associated approval.")
 
     approval = session.query(Approval).filter_by(id=intent.approval_id).first()
     if not approval or approval.decision != "APPROVED":
         raise SecurityViolationError("Approval record is missing or not APPROVED.")
+
+    # Prevent cross-intent approval reuse
+    if approval.payment_intent_id != intent.id:
+        raise SecurityViolationError("Cross-intent approval reuse detected! Approval is not bound to this payment intent.")
 
     if approval.invalidated_at is not None:
         raise SecurityViolationError(
@@ -136,10 +149,10 @@ def submit_approved_payout(
 
     if to_naive_utc(utcnow()) > to_naive_utc(approval.expires_at):
         intent.state = "INVALIDATED"
-        session.flush()
+        session.commit()
         raise SecurityViolationError("Approval has expired.")
 
-    # Step 3: Verify Approval Digest Integrity
+    # Step 3: Verify Approval Digest Integrity (Cryptographically binds invoice reference too!)
     expected_digest = compute_approval_digest(
         approval_type=approval.approval_type,
         bound_vendor_version_id=approval.bound_vendor_version_id,
@@ -149,14 +162,18 @@ def submit_approved_payout(
         expires_at=approval.expires_at,
         bound_amount_minor=approval.bound_amount_minor,
         bound_currency=approval.bound_currency,
+        bound_invoice_reference=approval.bound_invoice_reference,
         payment_intent_id=intent.id,
     )
     if approval.digest != expected_digest:
         raise SecurityViolationError("Approval digest verification failed! Parameters have been tampered with.")
 
-    # Verify amount and currency match approval
+    # Verify amount, currency, and invoice reference match approval
     if approval.bound_amount_minor != intent.amount_minor or approval.bound_currency != intent.currency:
         raise SecurityViolationError("Mismatched payment intent amount/currency against approval binding.")
+
+    if approval.bound_invoice_reference != intent.invoice_reference:
+        raise SecurityViolationError("Mismatched invoice reference against approval binding.")
 
     # Step 4: Verify Vendor and Version Integrity
     vendor = get_vendor(session, intent.vendor_id)
@@ -168,7 +185,7 @@ def submit_approved_payout(
         )
 
     version = session.query(VendorVersion).filter_by(id=approval.bound_vendor_version_id).first()
-    if not version or version.superseded_at is not None:
+    if not version or vendor.active_version_id != version.id:
         raise StaleVersionError(f"Vendor version '{approval.bound_vendor_version_id}' is superseded.")
 
     # Step 5: STRICT RECIPIENT RESOLUTION
@@ -177,20 +194,8 @@ def submit_approved_payout(
     if verified_recipient != approval.bound_recipient.lower():
         raise SecurityViolationError("Version recipient does not match approval binding.")
 
-    # Step 6: Idempotency & Duplicate Prevention
-    existing_attempt = (
-        session.query(PayoutAttempt)
-        .filter_by(payment_intent_id=intent.id)
-        .first()
-    )
-    if existing_attempt:
-        if existing_attempt.state == "SUCCESS":
-            raise DuplicatePayoutError(f"Payment intent '{intent.id}' has already been successfully paid out.")
-        if existing_attempt.state in ("RESERVED", "SUBMITTED"):
-            # Return existing attempt to enforce idempotency
-            return existing_attempt
-
-    # Step 7: Persist PayoutAttempt in RESERVED state before network submission
+    # Step 6: Persist and COMMIT PayoutAttempt in RESERVED state BEFORE network submission
+    # This guarantees idempotency keys and state are durable on disk before any network packet is dispatched.
     sender_batch_id = f"vt_batch_{uuid.uuid4().hex[:12]}"
     sender_item_id = f"vt_item_{uuid.uuid4().hex[:12]}"
     attempt_id = str(uuid.uuid4())
@@ -212,7 +217,6 @@ def submit_approved_payout(
     )
     session.add(attempt)
     intent.state = "SUBMISSION_RESERVED"
-    session.flush()
 
     record_audit_event(
         session=session,
@@ -231,18 +235,30 @@ def submit_approved_payout(
             "currency": intent.currency,
         },
     )
+    # DURABLE COMMIT BEFORE NETWORK TRANSIT
+    session.commit()
 
-    # Step 8: Dispatch to Provider
+    # Step 7: Dispatch to Provider
     payout_provider = provider or MockPayoutProvider(desired_item_status="SUCCESS")
-    provider_result = payout_provider.execute_payout(
-        sender_batch_id=sender_batch_id,
-        sender_item_id=sender_item_id,
-        recipient_email=verified_recipient,
-        amount_minor=intent.amount_minor,
-        currency=intent.currency,
-    )
+    try:
+        provider_result = payout_provider.execute_payout(
+            sender_batch_id=sender_batch_id,
+            sender_item_id=sender_item_id,
+            recipient_email=verified_recipient,
+            amount_minor=intent.amount_minor,
+            currency=intent.currency,
+        )
+    except Exception as e:
+        # Safe handling of uncertain network exception: preserve stable IDs and mark RECONCILE_REQUIRED
+        attempt.state = "RECONCILE_REQUIRED"
+        intent.state = "RECONCILE_REQUIRED"
+        attempt.provider_response_redacted = f"Provider network dispatch exception: {str(e)}"
+        attempt.last_provider_check = utcnow()
+        intent.updated_at = utcnow()
+        session.commit()
+        return attempt
 
-    # Step 9: Reconcile provider result
+    # Step 8: Reconcile provider result
     attempt.payout_batch_id = provider_result.get("payout_batch_id")
     attempt.payout_item_id = provider_result.get("payout_item_id")
     attempt.provider_response_redacted = provider_result.get("response_redacted")
@@ -264,8 +280,6 @@ def submit_approved_payout(
         intent.state = "FAILED"
 
     intent.updated_at = utcnow()
-    session.flush()
-
     record_audit_event(
         session=session,
         event_type="PAYOUT_COMPLETED",
@@ -281,5 +295,6 @@ def submit_approved_payout(
             "resolved_recipient": verified_recipient,
         },
     )
+    session.commit()
 
     return attempt

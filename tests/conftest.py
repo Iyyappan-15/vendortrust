@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session
-from app.db import Base
+from app.db import Base, create_immutability_triggers
 from app.services.vendor_registry import (
     APPROVER_RAVI_ID,
     REQUESTER_ASHA_ID,
@@ -21,6 +21,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=30000")
         finally:
             cursor.close()
 
@@ -34,6 +35,8 @@ def db_session() -> Session:
         echo=False,
     )
     Base.metadata.create_all(bind=engine)
+    create_immutability_triggers(engine)
+
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = TestingSessionLocal()
     try:
@@ -54,6 +57,8 @@ def seeded_env(db_session: Session):
         initial_paypal_recipient="acme-pay@example.test",
         requester_id=asha.id,
         approver_id=ravi.id,
+        independent_contact_proof_type="CONTRACT_ON_FILE",
+        proof_reference="MASTER-MSA-2026-001",
     )
     db_session.commit()
     return {
