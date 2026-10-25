@@ -1,22 +1,23 @@
 """
-app/web/deps.py — FastAPI dependency injection for demo and private session handling.
+app/web/deps.py — FastAPI dependency injection for demo session and CSRF security.
 """
-from typing import Optional, Tuple
-from fastapi import Cookie, Request, HTTPException
+from typing import Optional
+from fastapi import Cookie, Form, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.config import OPERATOR_API_KEY
-from app.web.session import get_demo_session_db, new_demo_session
+from app.web.session import get_demo_session_db, validate_csrf_token
 
 
 class DemoContext:
-    """Carries the per-demo-session database and user identity data."""
-    def __init__(self, db: Session, meta: dict):
+    """Carries the per-demo-session database, user identity, and session CSRF token."""
+    def __init__(self, db: Session, meta: dict, session_token: str):
         self.db = db
+        self.session_token = session_token
         self.asha_id: str = meta["asha_id"]
         self.ravi_id: str = meta["ravi_id"]
         self.vendor_id: str = meta["vendor_id"]
         self.v1_id: str = meta["v1_id"]
+        self.csrf_token: str = meta.get("csrf_token", "")
 
 
 def require_demo_context(demo_session: Optional[str] = Cookie(None)) -> DemoContext:
@@ -26,4 +27,10 @@ def require_demo_context(demo_session: Optional[str] = Cookie(None)) -> DemoCont
     db, meta = get_demo_session_db(demo_session)
     if db is None:
         raise HTTPException(status_code=403, detail="Demo session expired. Visit / to restart.")
-    return DemoContext(db=db, meta=meta)
+    return DemoContext(db=db, meta=meta, session_token=demo_session)
+
+
+def assert_csrf(ctx: DemoContext, submitted_csrf: Optional[str]) -> None:
+    """Enforces constant-time CSRF token check on state-changing browser routes."""
+    if not validate_csrf_token(ctx.session_token, submitted_csrf):
+        raise HTTPException(status_code=403, detail="CSRF token validation failed. Request rejected.")

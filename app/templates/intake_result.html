@@ -50,16 +50,36 @@
 {# ── AI Extraction Result ── #}
 <div class="card">
   <div class="card-title">
-    <span class="icon">🤖</span> AI Extraction Output
-    {% if ai_used %}<span class="badge badge-ai" style="margin-left:8px;">Live Gemini AI</span>{% else %}<span class="badge" style="margin-left:8px;background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid rgba(100,116,139,.25);">Heuristic Fallback</span>{% endif %}
+    <span class="icon">🤖</span> AI Intake Pipeline Output
+    {% if result.candidate.extraction_provider == 'GEMINI' %}
+      <span class="badge badge-ai" style="margin-left:8px;">Live Gemini AI ({{ result.candidate.model_version or "gemini-2.5-flash" }})</span>
+    {% elif result.candidate.extraction_provider == 'RECORDED_DEMO' %}
+      <span class="badge" style="margin-left:8px;background:rgba(59,130,246,.15);color:#93c5fd;border:1px solid rgba(59,130,246,.25);">Recorded Demo Cache</span>
+    {% else %}
+      <span class="badge" style="margin-left:8px;background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid rgba(100,116,139,.25);">Deterministic Heuristic Fallback</span>
+    {% endif %}
   </div>
+
+  {% if result.candidate.fallback_reason %}
+  <div class="alert alert-info" style="margin-bottom:14px;background:rgba(148,163,184,.08);border-color:rgba(148,163,184,.2);">
+    <span class="alert-icon">ℹ️</span>
+    <div class="alert-body">
+      <div class="alert-title">Honest Pipeline Attribution</div>
+      {{ result.candidate.fallback_reason }}
+    </div>
+  </div>
+  {% endif %}
 
   <div class="ai-callout">
     <div class="ai-callout-header">
-      🤖 {% if ai_used %}Gemini AI Extraction{% else %}Deterministic Heuristic Extraction{% endif %} — Advisory Output Only
+      🤖 {% if result.candidate.extraction_provider == 'GEMINI' %}Gemini AI Model ({{ result.candidate.model_version }}){% else %}Deterministic Fallback Engine{% endif %} — Advisory Output Only
     </div>
     <div class="ai-callout-body">
       <table style="font-size:.84rem;">
+        <tr>
+          <th style="width:200px;padding:8px 12px;text-align:left;color:var(--text-dim);">Extraction Provider</th>
+          <td style="padding:8px 12px;font-family:monospace;font-weight:600;">{{ result.candidate.extraction_provider }}</td>
+        </tr>
         <tr>
           <th style="width:200px;padding:8px 12px;text-align:left;color:var(--text-dim);">Payee change requested</th>
           <td style="padding:8px 12px;">{% if result.candidate.payee_change_requested %}✅ Yes{% else %}❌ No{% endif %}</td>

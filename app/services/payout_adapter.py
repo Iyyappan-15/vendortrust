@@ -10,6 +10,8 @@ Strict Security Constraints:
 """
 
 import os
+import secrets
+from decimal import Decimal
 from typing import Any, Dict, Optional
 import httpx
 
@@ -17,6 +19,22 @@ from app.config import OPERATOR_API_KEY, PAYPAL_MODE
 from app.services.exceptions import SecurityViolationError
 
 SANDBOX_BASE_URL = "https://api-m.sandbox.paypal.com"
+
+
+def format_minor_amount(amount_minor: int, currency: str = "USD") -> str:
+    """
+    Format integer minor units (e.g. 100 -> '1.00') without floating-point arithmetic.
+    Validates amount is positive and currency is supported.
+    """
+    if not isinstance(amount_minor, int) or amount_minor <= 0:
+        raise ValueError(f"Invalid amount_minor: {amount_minor}. Must be a positive integer.")
+
+    clean_curr = currency.strip().upper()
+    if clean_curr != "USD":
+        raise ValueError(f"Unsupported currency '{currency}'. Only 2-decimal 'USD' supported in sandbox.")
+
+    whole, frac = divmod(amount_minor, 100)
+    return f"{whole}.{frac:02d}"
 
 
 class ExecutionMode:
@@ -74,8 +92,8 @@ class PayPalSandboxPayoutAdapter:
             "Authorization": f"Bearer {access_token}",
         }
 
-        # Convert integer cents to exact decimal string
-        amount_decimal = f"{amount_minor / 100:.2f}"
+        # Convert integer minor units without float precision loss
+        amount_decimal = format_minor_amount(amount_minor, currency)
 
         payload = {
             "sender_batch_header": {
@@ -212,9 +230,16 @@ def resolve_payout_provider(
         return MockPayoutProvider(desired_item_status=mock_desired_status)
 
     if execution_mode == ExecutionMode.PRIVATE_SANDBOX:
-        # Server-enforced operator authorization
-        if not operator_token or (OPERATOR_API_KEY and operator_token != OPERATOR_API_KEY):
-            raise SecurityViolationError("Unauthorized access to Private Sandbox Payout Execution. Valid operator credentials required.")
+        # Server-enforced operator authorization: strictly FAILS CLOSED if key is unset/blank
+        if not OPERATOR_API_KEY or len(OPERATOR_API_KEY.strip()) < 16:
+            raise SecurityViolationError(
+                "Private Sandbox execution is disabled: OPERATOR_API_KEY is not securely configured on the server."
+            )
+
+        if not operator_token or not secrets.compare_digest(operator_token.strip(), OPERATOR_API_KEY.strip()):
+            raise SecurityViolationError(
+                "Unauthorized access to Private Sandbox Payout Execution. Valid operator credentials required."
+            )
 
         client_id = os.getenv("PAYPAL_CLIENT_ID", "").strip()
         client_secret = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()

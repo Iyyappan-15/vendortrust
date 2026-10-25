@@ -3,60 +3,67 @@
 {% block content %}
 <div class="flex-between mb-16">
   <div>
-    <div class="page-title">✉️ Verification Challenge Issued</div>
-    <div class="page-sub">An HMAC-keyed OTP has been dispatched to the trusted vendor contact.</div>
+    <div class="page-title">✉️ Verification Challenge Dispatched</div>
+    <div class="page-sub">Out-of-band challenge dispatched to pre-existing trusted vendor contact: <span class="td-mono">{{ challenge.delivery_destination }}</span></div>
   </div>
   <a href="/cases/{{ case_id }}" class="btn btn-outline">← Back to Case</a>
 </div>
 
-<div class="alert alert-info">
-  <span class="alert-icon">🔐</span>
+<div class="alert alert-warning" style="border-width:2px;">
+  <span class="alert-icon">⚠️</span>
   <div class="alert-body">
-    <div class="alert-title">Out-of-Band Verification</div>
-    In production, the OTP is sent exclusively to the pre-established trusted contact email on file — never to an email from the invoice. It is keyed with HMAC-SHA256 bound to the challenge ID, case ID, and proposed recipient.
+    <div class="alert-title">Trust Boundary Disclosure (Hackathon Simulation)</div>
+    In a real production system, the verification token is delivered via SMTP/SMS strictly out-of-band to the vendor's pre-established trusted contact (<span class="td-mono">{{ challenge.delivery_destination }}</span>).
+    The buyer/requester has <strong>no visibility</strong> into the vendor's private email.
+    For hackathon evaluation, the generated OTP is shown below inside the <strong>Simulated Vendor Mailbox</strong> block so you can test both the confirmation and compromise paths without setting up external mail servers.
   </div>
 </div>
 
 <div class="card" style="border-color:rgba(245,158,11,.35);">
-  <div class="card-title"><span class="icon">📬</span> Simulated Email Delivery</div>
-  <p style="color:var(--text-dim);font-size:.875rem;margin-bottom:20px;">
-    In this <span class="badge badge-mock">Demo Simulation</span> environment, the OTP is shown here instead of being emailed. In production, this value would never appear in the UI.
+  <div class="card-title">
+    <span class="icon">📬</span> Simulated External Vendor Mailbox
+    <span class="badge badge-mock" style="margin-left:8px;">Demo Persona: Vendor Contact</span>
+  </div>
+  <p style="color:var(--text-dim);font-size:.875rem;margin-bottom:16px;">
+    The following message was dispatched to the vendor's external mailbox.
   </p>
-  <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:20px;max-width:520px;">
-    <div style="font-size:.75rem;color:var(--text-xs);margin-bottom:8px;">FROM: no-reply@vendortrust.app &nbsp; TO: {{ challenge.delivery_destination }}</div>
+
+  <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:20px;max-width:560px;">
+    <div style="font-size:.75rem;color:var(--text-xs);margin-bottom:8px;">
+      FROM: security@vendortrust.app &nbsp;|&nbsp; TO: {{ challenge.delivery_destination }}
+    </div>
     <div style="font-size:.875rem;margin-bottom:16px;color:var(--text-dim);">
-      Subject: VendorTrust — Verify your requested payment change<br><br>
-      We received a request to update the PayPal recipient for your vendor account.<br><br>
-      <strong>Your verification code is:</strong>
+      Subject: Security Verification — Requested PayPal Change<br><br>
+      Please confirm if your company requested to change your approved PayPal recipient address.<br><br>
+      <strong>Your single-use verification code is:</strong>
     </div>
     <div style="background:var(--bg);border:2px dashed var(--warning);border-radius:6px;padding:16px;text-align:center;margin-bottom:16px;">
       <div style="font-size:1.6rem;font-weight:800;letter-spacing:.15em;color:var(--warning);font-family:monospace;">{{ raw_token }}</div>
     </div>
     <div style="font-size:.75rem;color:var(--text-xs);">
-      If you did not request this change, click "This wasn't me" in the VendorTrust portal immediately.<br>
-      This code expires in 15 minutes and can only be used once.
+      This token expires in 15 minutes. Stored on server strictly as a keyed HMAC-SHA256 hash. Plaintext is never stored in the database.
     </div>
   </div>
 
-  <div style="margin-top:24px;">
-    <div class="card-title" style="margin-bottom:12px;"><span class="icon">🔑</span> Technical Details</div>
-    <table>
-      <tr><th>Challenge ID</th><td class="td-mono">{{ challenge.id }}</td></tr>
-      <tr><th>Delivery channel</th><td>{{ challenge.delivery_channel }}</td></tr>
-      <tr><th>Trusted contact</th><td class="td-mono">{{ challenge.delivery_destination }}</td></tr>
-      <tr><th>Expires at</th><td>{{ fmt_dt(challenge.expires_at) }}</td></tr>
-      <tr><th>Max attempts</th><td>{{ challenge.max_attempts }}</td></tr>
-      <tr><th>Token stored as</th><td class="td-mono" style="color:var(--success);">HMAC-SHA256 (keyed, plaintext not stored)</td></tr>
-    </table>
+  <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
+    <a href="/cases/{{ case_id }}/vendor-mailbox" class="btn btn-warning">
+      📬 Open Full Simulated Vendor Mailbox →
+    </a>
+    <a href="/cases/{{ case_id }}" class="btn btn-primary">
+      Enter Code on Case View →
+    </a>
   </div>
 </div>
 
 <div class="card">
-  <div class="card-title"><span class="icon">➡️</span> Next: Vendor Confirms</div>
-  <p style="color:var(--text-dim);font-size:.875rem;margin-bottom:16px;">
-    Return to the case and paste the OTP to simulate the vendor's confirmation response.
-  </p>
-  <a href="/cases/{{ case_id }}" class="btn btn-primary">Go to Case → Enter OTP</a>
+  <div class="card-title"><span class="icon">🔑</span> Challenge Security Metadata</div>
+  <table>
+    <tr><th>Challenge ID</th><td class="td-mono">{{ challenge.id }}</td></tr>
+    <tr><th>Delivery channel</th><td>{{ challenge.delivery_channel }}</td></tr>
+    <tr><th>Trusted destination</th><td class="td-mono">{{ challenge.delivery_destination }}</td></tr>
+    <tr><th>Expires at</th><td>{{ fmt_dt(challenge.expires_at) }}</td></tr>
+    <tr><th>Max verification attempts</th><td>{{ challenge.max_attempts }}</td></tr>
+    <tr><th>Cryptographic storage</th><td class="td-mono" style="color:var(--success);">Keyed HMAC-SHA256 (Bound to Challenge ID + Case ID + Proposed Recipient)</td></tr>
+  </table>
 </div>
-
 {% endblock %}

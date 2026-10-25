@@ -269,3 +269,45 @@ def test_strict_api_invariant_recipient_from_immutable_vendor_version(db_session
     # Intent's immutable vendor version recipient is verified
     assert attempt.resolved_recipient == v1.paypal_recipient
     assert v1.paypal_recipient == "acme-pay@example.test"
+
+
+def test_format_minor_amount_integer_precision():
+    """Verify format_minor_amount formats exact USD minor units without float arithmetic."""
+    from app.services.payout_adapter import format_minor_amount
+    assert format_minor_amount(10000, "USD") == "100.00"
+    assert format_minor_amount(100, "USD") == "1.00"
+    assert format_minor_amount(1, "USD") == "0.01"
+    assert format_minor_amount(550, "USD") == "5.50"
+    assert format_minor_amount(105, "USD") == "1.05"
+
+    with pytest.raises(ValueError, match="positive"):
+        format_minor_amount(0, "USD")
+
+    with pytest.raises(ValueError, match="positive"):
+        format_minor_amount(-100, "USD")
+
+    with pytest.raises(ValueError, match="Unsupported currency"):
+        format_minor_amount(100, "EUR")
+
+
+def test_operator_api_key_fail_closed_when_empty_or_too_short(monkeypatch):
+    """
+    If OPERATOR_API_KEY is not set, blank, or less than 16 chars,
+    private sandbox mode must fail closed and reject all requests.
+    """
+    import app.services.payout_adapter as adapter_module
+
+    # Case 1: Empty string
+    monkeypatch.setattr(adapter_module, "OPERATOR_API_KEY", "")
+    with pytest.raises(SecurityViolationError, match="not securely configured"):
+        resolve_payout_provider(ExecutionMode.PRIVATE_SANDBOX, operator_token="any-token-here")
+
+    # Case 2: Too short (< 16 chars)
+    monkeypatch.setattr(adapter_module, "OPERATOR_API_KEY", "short-key-123")
+    with pytest.raises(SecurityViolationError, match="not securely configured"):
+        resolve_payout_provider(ExecutionMode.PRIVATE_SANDBOX, operator_token="short-key-123")
+
+    # Case 3: Proper key, but attacker sends empty token
+    monkeypatch.setattr(adapter_module, "OPERATOR_API_KEY", "a-sufficiently-long-secret-key-32b")
+    with pytest.raises(SecurityViolationError, match="Unauthorized access"):
+        resolve_payout_provider(ExecutionMode.PRIVATE_SANDBOX, operator_token="")

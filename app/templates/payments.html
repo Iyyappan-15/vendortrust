@@ -16,6 +16,7 @@
       Created by Requester (Asha). Bound to the current active vendor version at creation time. Must be independently approved by Approver (Ravi) before execution.
     </p>
     <form method="post" action="/payments/create">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="form-row">
         <label class="form-label">Invoice Reference</label>
         <input type="text" name="invoice_reference" class="form-input" placeholder="INV-2026-001" required>

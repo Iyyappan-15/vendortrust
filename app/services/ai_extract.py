@@ -61,6 +61,18 @@ class CandidateExtractionResult(BaseModel):
         True,
         description="Always true for payee changes; human in the loop is mandatory."
     )
+    extraction_provider: str = Field(
+        "HEURISTIC",
+        description="Actual execution source: GEMINI, HEURISTIC, or RECORDED_DEMO."
+    )
+    fallback_reason: Optional[str] = Field(
+        None,
+        description="Safe user-visible explanation if AI inference was unavailable or failed."
+    )
+    model_version: Optional[str] = Field(
+        None,
+        description="Specific model identifier when GEMINI is executed."
+    )
 
     @field_validator("proposed_recipient")
     @classmethod
@@ -82,7 +94,11 @@ def detect_suspicious_prompt_injections(text: str) -> bool:
     return False
 
 
-def heuristic_extract_candidate(text: str, source_type: str = "email_text") -> CandidateExtractionResult:
+def heuristic_extract_candidate(
+    text: str,
+    source_type: str = "email_text",
+    fallback_reason: Optional[str] = None,
+) -> CandidateExtractionResult:
     """
     Deterministic rule-based extractor for adversarial fixture evaluation,
     offline test suites, and fallback processing.
@@ -143,6 +159,9 @@ def heuristic_extract_candidate(text: str, source_type: str = "email_text") -> C
         confidence_note=confidence,
         suspicious_instructions_present=is_suspicious,
         needs_human_review=True if (payee_change or is_suspicious) else False,
+        extraction_provider="HEURISTIC",
+        fallback_reason=fallback_reason,
+        model_version=None,
     )
 
 
@@ -154,12 +173,33 @@ def extract_candidate_payee_change(
     """
     Main entry point for AI candidate payee extraction.
     Calls Gemini API if available; falls back cleanly to deterministic heuristic extractor.
+    Reports the actual execution provider honestly: GEMINI, HEURISTIC, or RECORDED_DEMO.
     AI can only propose a candidate; it can NEVER authorize or mutate state.
     """
-    if force_heuristic or not GEMINI_API_KEY:
-        return heuristic_extract_candidate(untrusted_text, source_type=source_type)
+    if force_heuristic:
+        return heuristic_extract_candidate(
+            untrusted_text,
+            source_type=source_type,
+            fallback_reason="User requested offline/heuristic extraction.",
+        )
 
-    # Attempt Gemini API inference if key is present
+    import os
+    api_key = (os.getenv("GEMINI_API_KEY") or GEMINI_API_KEY or "").strip()
+    has_valid_key = bool(
+        api_key
+        and api_key != "your_gemini_api_key_here"
+        and len(api_key) >= 20
+    )
+
+    if not has_valid_key:
+        return heuristic_extract_candidate(
+            untrusted_text,
+            source_type=source_type,
+            fallback_reason="No valid GEMINI_API_KEY configured in server environment.",
+        )
+
+    # Attempt Gemini API inference with configured or default model
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
     try:
         import httpx
 
@@ -184,7 +224,7 @@ UNTRUSTED SOURCE TEXT:
 {untrusted_text}
 \"\"\"
 """
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseMimeType": "application/json"}
@@ -195,9 +235,22 @@ UNTRUSTED SOURCE TEXT:
             if resp.status_code == 200:
                 raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
                 parsed = json.loads(raw_json)
-                return CandidateExtractionResult(**parsed)
-    except Exception:
-        # Fail safe: Fallback to local heuristic extractor
-        pass
-
-    return heuristic_extract_candidate(untrusted_text, source_type=source_type)
+                return CandidateExtractionResult(
+                    **parsed,
+                    extraction_provider="GEMINI",
+                    fallback_reason=None,
+                    model_version=model_name,
+                )
+            else:
+                err_snippet = resp.text[:150]
+                return heuristic_extract_candidate(
+                    untrusted_text,
+                    source_type=source_type,
+                    fallback_reason=f"Gemini API returned HTTP {resp.status_code}: {err_snippet}",
+                )
+    except Exception as e:
+        return heuristic_extract_candidate(
+            untrusted_text,
+            source_type=source_type,
+            fallback_reason=f"Gemini API request failed: {type(e).__name__} ({str(e)[:100]})",
+        )

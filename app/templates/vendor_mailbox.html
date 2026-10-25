@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Simulated Vendor Mailbox — VendorTrust{% endblock %}
+{% block content %}
+<div class="flex-between mb-16">
+  <div>
+    <div class="page-title">📬 Simulated External Vendor Mailbox</div>
+    <div class="page-sub">Persona: Vendor Contact (<span class="td-mono">{{ vendor.trusted_contact_email }}</span>)</div>
+  </div>
+  <a href="/cases/{{ case.id }}" class="btn btn-outline">← Back to Requester View</a>
+</div>
+
+<div class="alert alert-warning" style="border-width:2px;">
+  <span class="alert-icon">⚠️</span>
+  <div class="alert-body">
+    <div class="alert-title">Trust Assumption & Simulation Disclosure</div>
+    <strong>Simulation Mode Only:</strong> In a production deployment, this verification email is delivered out-of-band via external SMTP directly to the vendor's mail server. The buyer/requester has no access to this mailbox.
+    For hackathon evaluation and zero-dependency interactive demonstration, this screen simulates the vendor's private email client to show how the vendor reviews the request and either confirms it or flags a compromise.
+  </div>
+</div>
+
+{% if challenge and case.state == "CHALLENGE_ISSUED" %}
+<div class="card" style="border-color:var(--accent);">
+  <div class="card-title">
+    <span class="icon">✉️</span> Inbox for {{ vendor.trusted_contact_email }}
+    <span class="badge badge-challenge" style="margin-left:8px;">New Unread Security Notice</span>
+  </div>
+
+  <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:24px;margin-bottom:20px;">
+    <div style="display:flex;justify-content:space-between;border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:16px;">
+      <div>
+        <div style="font-weight:700;font-size:1rem;color:var(--text);">SECURITY NOTICE: Verify requested change to your PayPal payout address</div>
+        <div style="font-size:.78rem;color:var(--text-dim);margin-top:4px;">From: <code>security-verification@vendortrust.app</code> &nbsp;|&nbsp; To: <code>{{ vendor.trusted_contact_email }}</code></div>
+      </div>
+      <div style="font-size:.75rem;color:var(--text-xs);">{{ fmt_dt(challenge.created_at) }}</div>
+    </div>
+
+    <div style="font-size:.875rem;line-height:1.7;color:var(--text);">
+      <p>Hello Acme Design Labs Billing Team,</p>
+      <br>
+      <p>We received a request through our accounts payable portal to update your approved PayPal disbursement address from your current record to:</p>
+      <div style="background:var(--bg);border-left:3px solid var(--warning);padding:10px 14px;margin:12px 0;font-family:monospace;font-size:.9rem;color:var(--warning);">
+        Proposed New Recipient: {{ case.proposed_recipient }}
+      </div>
+      <p>To confirm that your organization authorized this change, enter the following single-use verification token:</p>
+      
+      <div style="background:var(--bg);border:2px dashed var(--accent);border-radius:6px;padding:16px;text-align:center;margin:16px 0;">
+        <div style="font-size:.75rem;color:var(--text-xs);margin-bottom:4px;">ONE-TIME SECURITY PASSCODE (EXPIRES IN 15 MINUTES)</div>
+        <div style="font-size:1.8rem;font-weight:800;letter-spacing:.15em;color:var(--accent);font-family:monospace;">{{ challenge.token_hash[:12] }}... [HMAC-SHA256 Token on Server]</div>
+      </div>
+
+      <p style="font-size:.8rem;color:var(--text-dim);">
+        <strong>Did not request this change?</strong> If anyone at your company did not request this update, click <em>Report Compromise</em> below immediately. This will freeze your account and alert our fraud team.
+      </p>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:16px;flex-wrap:wrap;">
+    <form method="post" action="/cases/{{ case.id }}/verify" style="flex:1;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="form-row">
+        <label class="form-label">Simulate Vendor Entering Code:</label>
+        <input type="text" name="submitted_token" class="form-input" placeholder="Paste verification code provided to vendor" required>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;">
+        ✅ Vendor Confirms: "Yes, I Requested This Change"
+      </button>
+    </form>
+
+    <form method="post" action="/cases/{{ case.id }}/reject-compromise" style="flex:1;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="form-row">
+        <label class="form-label">Vendor Flags Unauthorized Compromise:</label>
+        <button type="submit" class="btn btn-danger" style="width:100%;margin-top:24px;" onclick="return confirm('Simulate vendor reporting compromise? This will immediately FREEZE the vendor.')">
+          🚨 Vendor Reports: "This Wasn't Me" (Compromise)
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% elif case.state == "VENDOR_CONFIRMED" %}
+<div class="alert alert-success">
+  <span class="alert-icon">✅</span>
+  <div class="alert-body">
+    <div class="alert-title">Vendor Confirmation Recorded</div>
+    The vendor has successfully submitted the single-use token. The case is now awaiting independent internal review by Approver Ravi.
+  </div>
+</div>
+<a href="/cases/{{ case.id }}" class="btn btn-primary">Return to Case for Approver Review →</a>
+{% elif case.state == "REJECTED_COMPROMISE_SUSPECTED" %}
+<div class="alert alert-danger">
+  <span class="alert-icon">🚨</span>
+  <div class="alert-body">
+    <div class="alert-title">Vendor Reported Compromise</div>
+    The vendor selected "This wasn't me". The vendor status is now <strong>FROZEN_SUSPECTED_COMPROMISE</strong> and all automated payouts are halted.
+  </div>
+</div>
+<a href="/cases/{{ case.id }}" class="btn btn-outline">Return to Case Overview →</a>
+{% else %}
+<div class="card">
+  <div class="empty-state">
+    <div class="empty-icon">📭</div>
+    <div class="empty-text">No active challenge is currently awaiting vendor response for this case.</div>
+  </div>
+  <a href="/cases/{{ case.id }}" class="btn btn-outline" style="margin-top:12px;">Back to Case</a>
+</div>
+{% endif %}
+
+{% endblock %}

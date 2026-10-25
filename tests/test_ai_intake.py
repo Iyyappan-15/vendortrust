@@ -141,3 +141,51 @@ def test_intake_pipeline_prompt_injection_forced_hold(db_session, seeded_env):
     assert result.case is not None
     assert result.case.state == "HELD"
     assert result.case.proposed_recipient == "attacker@pwn.test"
+
+
+def test_ai_extraction_provider_honesty_heuristic_fallback():
+    """Verify that heuristic fallback truthfully reports provider and fallback reason."""
+    text = "Please update our payment address to new-vendor@example.test"
+    result = extract_candidate_payee_change(text, source_type="email_text", force_heuristic=True)
+    assert result.extraction_provider == "HEURISTIC"
+    assert result.fallback_reason is not None
+    assert "heuristic" in result.fallback_reason.lower()
+
+
+def test_ai_extraction_provider_honesty_live_gemini(monkeypatch):
+    """When Gemini returns a valid JSON response, extraction_provider is recorded as GEMINI."""
+    from unittest.mock import MagicMock
+    import httpx
+
+    fake_response_json = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                '{"payee_change_requested": true, '
+                                '"proposed_recipient": "gemini-extracted@partner.test", '
+                                '"evidence_snippet": "new email is gemini-extracted@partner.test", '
+                                '"suspicious_instructions_present": false, '
+                                '"needs_human_review": true, '
+                                '"confidence_note": "Extracted via Gemini 2.5 Flash"}'
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fake_response_json
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyDummyValidKeyWithSufficientLength12345")
+    with monkeypatch.context() as m:
+        m.setattr(httpx.Client, "post", lambda self, *args, **kwargs: mock_resp)
+        result = extract_candidate_payee_change("Sample text", source_type="email_text", force_heuristic=False)
+        assert result.extraction_provider == "GEMINI"
+        assert result.proposed_recipient == "gemini-extracted@partner.test"
+        assert result.model_version is not None

@@ -6,7 +6,9 @@ Security Invariants enforced in every handler:
 2. PRIVATE_SANDBOX requires server-verified operator token; never exposed to public users.
 3. Every payout resolves recipient exclusively from immutable, approved VendorVersion.
 4. AI output is advisory; never overrides deterministic hold decisions.
-5. Simulated and AI outputs are labeled explicitly in the response.
+5. Simulated and AI outputs are labeled explicitly with actual provider (GEMINI / HEURISTIC).
+6. CSRF validation enforced on state-changing POST requests.
+7. Out-of-band verification is cleanly separated into a dedicated Simulated Vendor Mailbox.
 """
 import datetime
 import json
@@ -17,7 +19,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
-from app.config import OPERATOR_API_KEY
+from app.config import APP_ENV, OPERATOR_API_KEY
 from app.models import (
     AuditEvent,
     Approval,
@@ -26,6 +28,7 @@ from app.models import (
     PayoutAttempt,
     VendorVersion,
     Vendor,
+    VerificationChallenge,
     utcnow,
 )
 from app.services.ai_extract import extract_candidate_payee_change
@@ -53,14 +56,16 @@ from app.services.intake import process_incoming_document
 from app.services.payouts import MockPayoutProvider, submit_approved_payout
 from app.services.policy import PolicyDecision
 from app.services.vendor_registry import get_vendor
-from app.web.deps import DemoContext, require_demo_context
+from app.web.deps import DemoContext, assert_csrf, require_demo_context
 from app.web.session import new_demo_session, destroy_demo_session
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
+SECURE_COOKIES = (APP_ENV in ("production", "prod"))
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Jinja2 helpers
+# Jinja2 globals
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _badge_state(state: str) -> str:
@@ -124,18 +129,44 @@ async def start_demo(request: Request):
     """Create a fresh isolated PUBLIC_DEMO session."""
     token = new_demo_session()
     resp = RedirectResponse(url="/inbox", status_code=303)
-    resp.set_cookie("demo_session", token, httponly=True, samesite="lax", max_age=7200)
+    resp.set_cookie(
+        "demo_session",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=SECURE_COOKIES,
+        max_age=7200,
+    )
     return resp
 
 
 @router.post("/reset-demo", response_class=HTMLResponse)
-async def reset_demo(request: Request, demo_session: Optional[str] = Cookie(None)):
+async def reset_demo(
+    request: Request,
+    demo_session: Optional[str] = Cookie(None),
+    csrf_token: Optional[str] = Form(None),
+):
     """Destroy current demo session and start fresh."""
     if demo_session:
+        # Validate CSRF if session existed
+        from app.web.session import validate_csrf_token, get_demo_session_db
+        db, meta = get_demo_session_db(demo_session)
+        if db is not None:
+            db.close()
+            if not csrf_token or not validate_csrf_token(demo_session, csrf_token):
+                raise HTTPException(status_code=403, detail="Invalid or missing CSRF token for demo reset.")
         destroy_demo_session(demo_session)
+
     token = new_demo_session()
     resp = RedirectResponse(url="/inbox", status_code=303)
-    resp.set_cookie("demo_session", token, httponly=True, samesite="lax", max_age=7200)
+    resp.set_cookie(
+        "demo_session",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=SECURE_COOKIES,
+        max_age=7200,
+    )
     return resp
 
 
@@ -159,6 +190,7 @@ async def inbox(request: Request, ctx: DemoContext = Depends(require_demo_contex
         "intents": intents,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -168,12 +200,13 @@ async def inbox_submit(
     document_text: str = Form(...),
     source_type: str = Form("email_text"),
     use_ai: str = Form("0"),
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
     """Process an incoming invoice or email through the deterministic intake pipeline."""
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     force_heuristic = (use_ai != "1")
-    ai_used = not force_heuristic
 
     try:
         result = process_incoming_document(
@@ -195,14 +228,15 @@ async def inbox_submit(
             "intents": [],
             "asha_id": ctx.asha_id,
             "ravi_id": ctx.ravi_id,
+            "csrf_token": ctx.csrf_token,
         })
 
     return templates.TemplateResponse(request=request, name="intake_result.html", context={
         "result": result,
         "document_text": document_text[:500],
-        "ai_used": ai_used,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -220,6 +254,7 @@ async def list_cases(request: Request, ctx: DemoContext = Depends(require_demo_c
         "cases": cases,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -237,7 +272,6 @@ async def case_detail(
     vendor = db.query(Vendor).filter_by(id=case.vendor_id).first()
     base_version = db.query(VendorVersion).filter_by(id=case.base_version_id).first()
 
-    from app.models import VerificationChallenge
     challenge = (
         db.query(VerificationChallenge)
         .filter_by(case_id=case_id)
@@ -257,6 +291,7 @@ async def case_detail(
         "audit": audit,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -264,9 +299,11 @@ async def case_detail(
 async def issue_challenge(
     request: Request,
     case_id: str,
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
     """Issue out-of-band HMAC-keyed verification challenge to trusted vendor contact."""
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     try:
         challenge, raw_token = issue_verification_challenge(
@@ -282,9 +319,43 @@ async def issue_challenge(
     return templates.TemplateResponse(request=request, name="challenge_issued.html", context={
         "case_id": case_id,
         "challenge": challenge,
-        "raw_token": raw_token,  # In demo: shown to user as "email simulation"
+        "raw_token": raw_token,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
+    })
+
+
+@router.get("/cases/{case_id}/vendor-mailbox", response_class=HTMLResponse)
+async def vendor_simulated_mailbox(
+    request: Request,
+    case_id: str,
+    ctx: DemoContext = Depends(require_demo_context),
+):
+    """
+    Dedicated view for Simulated Vendor External Mailbox (Demo Persona: Vendor Contact).
+    Explicitly separated from the requester view to demonstrate trust boundaries honestly.
+    """
+    db = ctx.db
+    case = db.query(PayeeChangeCase).filter_by(id=case_id).first()
+    if not case:
+        raise HTTPException(404, "Case not found")
+
+    vendor = db.query(Vendor).filter_by(id=case.vendor_id).first()
+    challenge = (
+        db.query(VerificationChallenge)
+        .filter_by(case_id=case_id)
+        .order_by(VerificationChallenge.created_at.desc())
+        .first()
+    )
+
+    return templates.TemplateResponse(request=request, name="vendor_mailbox.html", context={
+        "case": case,
+        "vendor": vendor,
+        "challenge": challenge,
+        "asha_id": ctx.asha_id,
+        "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -293,9 +364,11 @@ async def verify_challenge(
     request: Request,
     case_id: str,
     submitted_token: str = Form(...),
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
     """Vendor confirms change by submitting received OTP token."""
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     try:
         case = verify_vendor_confirmation(
@@ -314,15 +387,17 @@ async def verify_challenge(
 async def reject_compromise(
     request: Request,
     case_id: str,
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
-    """Vendor flags the change as 'This wasn't me' — triggers REJECTED_COMPROMISE and freezes vendor."""
+    """Vendor flags change as 'This wasn't me' — triggers REJECTED_COMPROMISE and freezes vendor."""
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     try:
         record_vendor_rejection_compromise(
             session=db,
             case_id=case_id,
-            actor_note="Vendor clicked 'This wasn't me' via VendorTrust portal",
+            actor_note="Vendor clicked 'This wasn't me' via simulated vendor mailbox",
         )
         db.commit()
     except Exception as e:
@@ -335,9 +410,11 @@ async def reject_compromise(
 async def approver_approve_case(
     request: Request,
     case_id: str,
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
     """Approver (Ravi) independently activates the vendor-confirmed change, creating v(n+1)."""
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     try:
         activated_case, new_version = approve_payee_change_case(
@@ -370,6 +447,7 @@ async def list_payments(request: Request, ctx: DemoContext = Depends(require_dem
         "intents": intents,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -379,9 +457,11 @@ async def create_intent(
     invoice_reference: str = Form(...),
     amount_minor: int = Form(...),
     currency: str = Form("USD"),
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
     """Requester (Asha) creates a payment intent bound to active vendor version."""
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     try:
         intent = create_payment_intent(
@@ -427,6 +507,7 @@ async def payment_detail(
         "audit": audit,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -434,9 +515,11 @@ async def payment_detail(
 async def approver_approve_intent(
     request: Request,
     intent_id: str,
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
     """Approver (Ravi) authorizes the payment intent. Requester cannot approve own intent."""
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     try:
         approve_payment_intent(
@@ -455,6 +538,7 @@ async def approver_approve_intent(
 async def execute_payment(
     request: Request,
     intent_id: str,
+    csrf_token: Optional[str] = Form(None),
     ctx: DemoContext = Depends(require_demo_context),
 ):
     """
@@ -462,6 +546,7 @@ async def execute_payment(
     Recipient resolved exclusively from immutable approved VendorVersion.
     Simulated payout is labeled clearly in the response.
     """
+    assert_csrf(ctx, csrf_token)
     db = ctx.db
     # INVARIANT: In PUBLIC_DEMO, ALWAYS use MockPayoutProvider. Never real PayPal.
     mock_provider = MockPayoutProvider(desired_item_status="SUCCESS")
@@ -491,6 +576,7 @@ async def audit_timeline(request: Request, ctx: DemoContext = Depends(require_de
         "events": events,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })
 
 
@@ -512,4 +598,5 @@ async def vendor_detail(request: Request, ctx: DemoContext = Depends(require_dem
         "active_version": active_version,
         "asha_id": ctx.asha_id,
         "ravi_id": ctx.ravi_id,
+        "csrf_token": ctx.csrf_token,
     })

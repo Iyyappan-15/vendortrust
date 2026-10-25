@@ -28,6 +28,7 @@
     <div class="card">
       <div class="card-title"><span class="icon">📄</span> Submit Document</div>
       <form method="post" action="/inbox/submit">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-row">
           <label class="form-label">Document / Email Text</label>
           <textarea name="document_text" class="form-textarea" rows="8"

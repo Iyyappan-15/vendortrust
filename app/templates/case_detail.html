@@ -71,22 +71,28 @@
     </table>
 
     {% if case.state == "CHALLENGE_ISSUED" %}
-    <div class="alert alert-warning" style="margin-bottom:16px;">
-      <span class="alert-icon">🔐</span>
+    <div class="alert alert-info" style="margin-bottom:16px;">
+      <span class="alert-icon">📬</span>
       <div class="alert-body">
-        <div class="alert-title">Awaiting vendor response</div>
-        In this demo, the OTP was shown when the challenge was issued. The vendor enters it below to confirm the change.
+        <div class="alert-title">Simulated Vendor Mailbox Available</div>
+        In production, this verification email is delivered out-of-band to the vendor's pre-registered contact (<code>{{ challenge.delivery_destination }}</code>). For demonstration and review convenience:
+        <div style="margin-top:8px;">
+          <a href="/cases/{{ case.id }}/vendor-mailbox" class="btn btn-outline btn-sm">Open Simulated Vendor Mailbox →</a>
+        </div>
       </div>
     </div>
+
     <form method="post" action="/cases/{{ case.id }}/verify" style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div style="flex:1;">
         <label class="form-label">Enter Vendor OTP</label>
-        <input type="text" name="submitted_token" class="form-input" placeholder="Paste the OTP shown when challenge was issued" autocomplete="off">
+        <input type="text" name="submitted_token" class="form-input" placeholder="Paste the OTP shown in vendor mailbox" autocomplete="off">
       </div>
       <button type="submit" class="btn btn-primary">✅ Confirm Change</button>
     </form>
     <div class="hr"></div>
     <form method="post" action="/cases/{{ case.id }}/reject-compromise">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn btn-danger" onclick="return confirm('Mark as compromise attempt? This will FREEZE the vendor immediately.')">
         🚨 This Wasn't Me — Report Compromise
       </button>
@@ -98,6 +104,7 @@
       No challenge has been issued yet. Issue an out-of-band HMAC-keyed verification challenge to the vendor's trusted contact email.
     </p>
     <form method="post" action="/cases/{{ case.id }}/issue-challenge">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn btn-warning">📤 Issue Verification Challenge</button>
     </form>
   {% elif case.state == "VENDOR_CONFIRMED" %}
@@ -118,6 +125,7 @@
   </div>
   <div style="display:flex;gap:12px;">
     <form method="post" action="/cases/{{ case.id }}/approve">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn btn-success" onclick="return confirm('Activate new vendor version? This will invalidate all pending approvals on the old version.')">
         ✅ Activate New Version (Ravi)
       </button>
