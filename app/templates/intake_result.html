@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Intake Result — VendorTrust{% endblock %}
+{% block content %}
+<div class="flex-between mb-16">
+  <div>
+    <div class="page-title">
+      {% if result.decision == 'HOLD' %}🔴 Document Held for Review
+      {% else %}🟢 Document Cleared
+      {% endif %}
+    </div>
+    <div class="page-sub">Intake pipeline completed — deterministic policy decision below.</div>
+  </div>
+  <a href="/inbox" class="btn btn-outline">← New Document</a>
+</div>
+
+{# ── Prompt injection warning ── #}
+{% if result.candidate.suspicious_instructions_present %}
+<div class="alert alert-danger">
+  <span class="alert-icon">🚨</span>
+  <div class="alert-body">
+    <div class="alert-title">Prompt Injection Detected</div>
+    Adversarial override instructions were detected in this document. The document has been automatically held. No recipient changes have been made. This attempt has been logged.
+  </div>
+</div>
+{% endif %}
+
+{# ── Policy decision ── #}
+<div class="card">
+  <div class="card-title"><span class="icon">🛡️</span> Policy Decision</div>
+  <div style="display:flex;gap:32px;align-items:center;flex-wrap:wrap;">
+    <div>
+      <div class="stat-label">Decision</div>
+      <div style="font-size:1.8rem;font-weight:800;{% if result.decision == 'HOLD' %}color:var(--warning){% elif result.decision == 'ALLOW_REVIEW' %}color:var(--info){% else %}color:var(--success){% endif %};">
+        {{ result.decision }}
+      </div>
+    </div>
+    <div>
+      <div class="stat-label">Reason Code</div>
+      <div class="font-mono" style="font-size:.9rem;margin-top:6px;">{{ result.reason_code }}</div>
+    </div>
+    {% if result.case %}
+    <div>
+      <div class="stat-label">Created Case</div>
+      <div style="margin-top:6px;"><a href="/cases/{{ result.case.id }}" class="btn btn-primary btn-sm">View Case →</a></div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── AI Extraction Result ── #}
+<div class="card">
+  <div class="card-title">
+    <span class="icon">🤖</span> AI Extraction Output
+    {% if ai_used %}<span class="badge badge-ai" style="margin-left:8px;">Live Gemini AI</span>{% else %}<span class="badge" style="margin-left:8px;background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid rgba(100,116,139,.25);">Heuristic Fallback</span>{% endif %}
+  </div>
+
+  <div class="ai-callout">
+    <div class="ai-callout-header">
+      🤖 {% if ai_used %}Gemini AI Extraction{% else %}Deterministic Heuristic Extraction{% endif %} — Advisory Output Only
+    </div>
+    <div class="ai-callout-body">
+      <table style="font-size:.84rem;">
+        <tr>
+          <th style="width:200px;padding:8px 12px;text-align:left;color:var(--text-dim);">Payee change requested</th>
+          <td style="padding:8px 12px;">{% if result.candidate.payee_change_requested %}✅ Yes{% else %}❌ No{% endif %}</td>
+        </tr>
+        <tr>
+          <th style="padding:8px 12px;text-align:left;color:var(--text-dim);">Proposed recipient</th>
+          <td style="padding:8px 12px;" class="td-mono">{{ result.candidate.proposed_recipient or "None extracted" }}</td>
+        </tr>
+        <tr>
+          <th style="padding:8px 12px;text-align:left;color:var(--text-dim);">Suspicious instructions</th>
+          <td style="padding:8px 12px;">{% if result.candidate.suspicious_instructions_present %}<span style="color:var(--danger);font-weight:700;">⚠️ YES — ADVERSARIAL CONTENT DETECTED</span>{% else %}No{% endif %}</td>
+        </tr>
+        <tr>
+          <th style="padding:8px 12px;text-align:left;color:var(--text-dim);">Human review needed</th>
+          <td style="padding:8px 12px;">{{ "Yes" if result.candidate.needs_human_review else "No" }}</td>
+        </tr>
+        <tr>
+          <th style="padding:8px 12px;text-align:left;color:var(--text-dim);">Confidence note</th>
+          <td style="padding:8px 12px;color:var(--text-dim);">{{ result.candidate.confidence_note }}</td>
+        </tr>
+      </table>
+    </div>
+    <div class="ai-disclaimer">⚠️ AI extraction is advisory only. Deterministic policy independently validates every candidate and makes the final hold/allow decision.</div>
+  </div>
+
+  {% if result.candidate.evidence_snippet %}
+  <div class="evidence">
+    <div class="evidence-label">Extracted Evidence Snippet</div>
+    {{ result.candidate.evidence_snippet }}
+  </div>
+  {% endif %}
+</div>
+
+{# ── Source document preview ── #}
+<div class="card">
+  <div class="card-title"><span class="icon">📄</span> Submitted Document (Preview)</div>
+  <div class="timeline-detail">{{ document_text }}</div>
+  <div class="text-xs mt-8">All submitted text is treated as untrusted external data.</div>
+</div>
+
+{# ── Next steps ── #}
+{% if result.case %}
+<div class="card">
+  <div class="card-title"><span class="icon">➡️</span> Next Steps</div>
+  <p style="color:var(--text-dim);font-size:.875rem;margin-bottom:16px;">
+    A payee change case has been created in HELD state. An out-of-band HMAC-keyed verification challenge
+    must be issued to the vendor's trusted contact before any change can proceed.
+  </p>
+  <div style="display:flex;gap:10px;">
+    <a href="/cases/{{ result.case.id }}" class="btn btn-primary">Open Case →</a>
+    <a href="/cases" class="btn btn-outline">View All Cases</a>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="card-title"><span class="icon">✅</span> No Action Required</div>
+  <p style="color:var(--text-dim);font-size:.875rem;">No payee change was detected or the submitted recipient matches the active vendor version. You may create a payment intent if appropriate.</p>
+  <a href="/payments" class="btn btn-primary" style="margin-top:12px;">Create Payment →</a>
+</div>
+{% endif %}
+{% endblock %}

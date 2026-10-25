@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Cases — VendorTrust{% endblock %}
+{% block content %}
+<div class="flex-between mb-16">
+  <div>
+    <div class="page-title">🔍 Payee Change Cases</div>
+    <div class="page-sub">All open and closed payee change cases. Click a case to view details, issue challenge, or approve.</div>
+  </div>
+  <a href="/inbox" class="btn btn-primary">+ Submit Document</a>
+</div>
+
+{% if cases %}
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Case ID</th>
+          <th>Proposed Recipient</th>
+          <th>Source</th>
+          <th>State</th>
+          <th>Created</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in cases %}
+      <tr>
+        <td class="td-mono">{{ short_id(c.id) }}</td>
+        <td class="td-mono">{{ c.proposed_recipient }}</td>
+        <td><span style="font-size:.75rem;color:var(--text-dim);">{{ c.source_type }}</span></td>
+        <td><span class="badge {{ badge_cls(c.state) }}">{{ c.state }}</span></td>
+        <td class="td-mono">{{ fmt_dt(c.created_at) }}</td>
+        <td><a href="/cases/{{ c.id }}" class="btn btn-outline btn-sm">View →</a></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="empty-state">
+    <div class="empty-icon">🔍</div>
+    <div class="empty-text">No payee change cases yet.<br>Submit a document in the inbox to trigger the intake pipeline.</div>
+    <a href="/inbox" class="btn btn-primary" style="margin-top:16px;">Go to Inbox</a>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

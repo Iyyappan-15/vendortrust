@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Audit — VendorTrust{% endblock %}
+{% block content %}
+<div class="page-title mb-16">📋 Audit Timeline</div>
+<div class="page-sub">Append-only record of all state transitions, decisions, and payout events.</div>
+
+<div class="card">
+  {% if events %}
+  <div class="timeline">
+    {% for ev in events %}
+    <div class="timeline-item">
+      <div class="timeline-line">
+        <div class="timeline-dot
+          {% if 'PAYOUT' in ev.event_type and 'SUCCESS' in (ev.state_after or '') %}dot-green
+          {% elif 'APPROVE' in ev.event_type %}dot-green
+          {% elif 'HOLD' in ev.event_type or 'FREEZE' in ev.event_type or 'REJECT' in ev.event_type or 'FAIL' in ev.event_type %}dot-red
+          {% elif 'CHALLENGE' in ev.event_type %}dot-yellow
+          {% elif 'CONFIRM' in ev.event_type or 'ACTIV' in ev.event_type %}dot-green
+          {% else %}dot-blue{% endif %}">
+          {% if 'PAYOUT' in ev.event_type %}💸
+          {% elif 'APPROVE' in ev.event_type %}✅
+          {% elif 'HOLD' in ev.event_type %}🔒
+          {% elif 'CHALLENGE' in ev.event_type %}✉️
+          {% elif 'CONFIRM' in ev.event_type %}✔
+          {% elif 'ACTIV' in ev.event_type %}🚀
+          {% elif 'FREEZE' in ev.event_type or 'REJECT' in ev.event_type %}🚨
+          {% elif 'INTAKE' in ev.event_type %}📄
+          {% elif 'INTENT' in ev.event_type %}💳
+          {% else %}●{% endif %}
+        </div>
+        <div class="timeline-connector"></div>
+      </div>
+      <div class="timeline-body">
+        <div class="timeline-title">{{ ev.event_type }}</div>
+        <div class="timeline-meta">
+          {{ fmt_dt(ev.created_at) }}
+          {% if ev.entity_type %} — {{ ev.entity_type }}{% endif %}
+          {% if ev.state_before or ev.state_after %}→ <span style="color:var(--text-dim);">{{ ev.state_before or "—" }}</span> ⟶ <span style="color:var(--text);">{{ ev.state_after or "—" }}</span>{% endif %}
+        </div>
+        {% if ev.details %}
+        <div class="timeline-detail">{{ ev.details[:300] }}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">📋</div>
+    <div class="empty-text">No audit events yet. Use the inbox to start the workflow.</div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

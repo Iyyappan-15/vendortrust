@@ -92,8 +92,8 @@ def heuristic_extract_candidate(text: str, source_type: str = "email_text") -> C
     # Search for payee change intent signals
     change_intent_signals = [
         r"change[ds]?\s+(?:our\s+)?(?:paypal|payment|payout|address|email|billing)",
-        r"new\s+(?:paypal|payout|payment|billing)\s+(?:address|email)",
-        r"update[ds]?\s+(?:our\s+)?(?:paypal|payment|payout|address|email|billing)",
+        r"new\s+(?:(?:paypal|payout|payment|billing)\s+)*(?:address|email)",
+        r"update[ds]?\s+(?:our\s+)?(?:(?:paypal|payment|payout|billing)\s+)*(?:address|email|to)",
         r"remit\s+(?:all\s+.*)?to",
         r"send\s+(?:payment|funds|payout|money|immediately)?\s*(?:to|all)?",
         r"please\s+(?:pay|send\s+to|remit\s+to)",

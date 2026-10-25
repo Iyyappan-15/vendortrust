@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}VendorTrust{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<nav class="topbar">
+  <a href="/" class="topbar-brand">Vendor<span>Trust</span></a>
+  <span class="demo-badge">Public Demo</span>
+
+  <div class="topbar-nav">
+    <a href="/inbox" class="{% if request.url.path == '/inbox' %}active{% endif %}">📥 Inbox</a>
+    <a href="/cases" class="{% if '/cases' in request.url.path %}active{% endif %}">🔍 Cases</a>
+    <a href="/payments" class="{% if '/payments' in request.url.path %}active{% endif %}">💳 Payments</a>
+    <a href="/vendor" class="{% if request.url.path == '/vendor' %}active{% endif %}">🏢 Vendor</a>
+    <a href="/audit" class="{% if request.url.path == '/audit' %}active{% endif %}">📋 Audit</a>
+  </div>
+
+  <div style="display:flex;gap:8px;margin-left:12px;">
+    <div class="role-pill"><span class="dot dot-requester"></span> Asha (Requester)</div>
+    <div class="role-pill"><span class="dot dot-approver"></span> Ravi (Approver)</div>
+  </div>
+  <form method="post" action="/reset-demo" style="margin-left:8px;">
+    <button type="submit" class="btn btn-outline btn-sm">↺ Reset Demo</button>
+  </form>
+</nav>
+
+<div class="container">
+  {% block content %}{% endblock %}
+</div>
+
+</body>
+</html>

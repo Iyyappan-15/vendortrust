@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}Case {{ short_id(case.id) }} — VendorTrust{% endblock %}
+{% block content %}
+<div class="flex-between mb-16">
+  <div>
+    <div class="page-title">🔍 Payee Change Case</div>
+    <div class="page-sub">ID: <span class="font-mono">{{ case.id }}</span></div>
+  </div>
+  <a href="/cases" class="btn btn-outline">← All Cases</a>
+</div>
+
+{% if request.query_params.get("approved") %}
+<div class="alert alert-success">
+  <span class="alert-icon">✅</span>
+  <div class="alert-body"><div class="alert-title">Version Activated</div>A new vendor version has been created and activated. All pending approvals on the previous version have been automatically invalidated.</div>
+</div>
+{% endif %}
+
+{# ── State banner ── #}
+{% if case.state == "REJECTED_COMPROMISE_SUSPECTED" %}
+<div class="alert alert-danger">
+  <span class="alert-icon">🚨</span>
+  <div class="alert-body">
+    <div class="alert-title">COMPROMISE FLAGGED — Vendor Frozen</div>
+    The vendor flagged this change as unauthorized. The vendor account is now FROZEN. All payout operations are halted until manually reviewed by an operator.
+  </div>
+</div>
+{% endif %}
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
+  {# ── Case summary ── #}
+  <div class="card">
+    <div class="card-title"><span class="icon">📋</span> Case Summary</div>
+    <table>
+      <tr><th>State</th><td><span class="badge {{ badge_cls(case.state) }}">{{ case.state }}</span></td></tr>
+      <tr><th>Proposed Recipient</th><td class="td-mono" style="color:var(--warning);">{{ case.proposed_recipient }}</td></tr>
+      <tr><th>Source</th><td>{{ case.source_type }}</td></tr>
+      <tr><th>Created</th><td>{{ fmt_dt(case.created_at) }}</td></tr>
+    </table>
+  </div>
+
+  {# ── Payee comparison ── #}
+  <div class="card">
+    <div class="card-title"><span class="icon">🔄</span> Payee Comparison</div>
+    <div class="diff-panel">
+      <div class="diff-col diff-old">
+        <div class="diff-col-title">Current (Trusted)</div>
+        <div class="diff-field"><span class="diff-key">recipient</span><span class="diff-val">{{ base_version.paypal_recipient if base_version else "—" }}</span></div>
+        <div class="diff-field"><span class="diff-key">version</span><span class="diff-val">v{{ base_version.version_number if base_version else "?" }}</span></div>
+      </div>
+      <div class="diff-col diff-new">
+        <div class="diff-col-title">Proposed</div>
+        <div class="diff-field"><span class="diff-key">recipient</span><span class="diff-val diff-val-changed">{{ case.proposed_recipient }}</span></div>
+        <div class="diff-field"><span class="diff-key">status</span><span class="diff-val">UNVERIFIED</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Challenge section ── #}
+<div class="card">
+  <div class="card-title"><span class="icon">✉️</span> Vendor Verification Challenge</div>
+
+  {% if challenge %}
+    <table style="margin-bottom:16px;">
+      <tr><th>Delivery Channel</th><td>{{ challenge.delivery_channel }}</td></tr>
+      <tr><th>Sent to (Trusted Contact)</th><td class="td-mono">{{ challenge.delivery_destination }}</td></tr>
+      <tr><th>Expires</th><td>{{ fmt_dt(challenge.expires_at) }}</td></tr>
+      <tr><th>Attempts</th><td>{{ challenge.attempts }} / {{ challenge.max_attempts }}</td></tr>
+      <tr><th>Consumed</th><td>{{ "Yes" if challenge.used_at else "No" }}</td></tr>
+    </table>
+
+    {% if case.state == "CHALLENGE_ISSUED" %}
+    <div class="alert alert-warning" style="margin-bottom:16px;">
+      <span class="alert-icon">🔐</span>
+      <div class="alert-body">
+        <div class="alert-title">Awaiting vendor response</div>
+        In this demo, the OTP was shown when the challenge was issued. The vendor enters it below to confirm the change.
+      </div>
+    </div>
+    <form method="post" action="/cases/{{ case.id }}/verify" style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px;">
+      <div style="flex:1;">
+        <label class="form-label">Enter Vendor OTP</label>
+        <input type="text" name="submitted_token" class="form-input" placeholder="Paste the OTP shown when challenge was issued" autocomplete="off">
+      </div>
+      <button type="submit" class="btn btn-primary">✅ Confirm Change</button>
+    </form>
+    <div class="hr"></div>
+    <form method="post" action="/cases/{{ case.id }}/reject-compromise">
+      <button type="submit" class="btn btn-danger" onclick="return confirm('Mark as compromise attempt? This will FREEZE the vendor immediately.')">
+        🚨 This Wasn't Me — Report Compromise
+      </button>
+    </form>
+    {% endif %}
+
+  {% elif case.state == "HELD" %}
+    <p style="color:var(--text-dim);margin-bottom:16px;font-size:.875rem;">
+      No challenge has been issued yet. Issue an out-of-band HMAC-keyed verification challenge to the vendor's trusted contact email.
+    </p>
+    <form method="post" action="/cases/{{ case.id }}/issue-challenge">
+      <button type="submit" class="btn btn-warning">📤 Issue Verification Challenge</button>
+    </form>
+  {% elif case.state == "VENDOR_CONFIRMED" %}
+    <div class="alert alert-success">
+      <span class="alert-icon">✅</span>
+      <div class="alert-body"><div class="alert-title">Vendor Confirmed</div>The vendor has verified the change. An independent approver (Ravi) must now review and activate the new version.</div>
+    </div>
+  {% endif %}
+</div>
+
+{# ── Approver section ── #}
+{% if case.state == "VENDOR_CONFIRMED" %}
+<div class="card" style="border-color:rgba(34,197,94,.25);">
+  <div class="card-title"><span class="icon">👤</span> Approver Review — Ravi</div>
+  <div class="alert alert-info" style="margin-bottom:16px;">
+    <span class="alert-icon">ℹ️</span>
+    <div class="alert-body">Approver (Ravi) independently reviews the vendor-confirmed change. This creates an immutable new vendor version. All pending approvals on the old version are automatically invalidated.</div>
+  </div>
+  <div style="display:flex;gap:12px;">
+    <form method="post" action="/cases/{{ case.id }}/approve">
+      <button type="submit" class="btn btn-success" onclick="return confirm('Activate new vendor version? This will invalidate all pending approvals on the old version.')">
+        ✅ Activate New Version (Ravi)
+      </button>
+    </form>
+  </div>
+</div>
+{% elif case.state == "VERSION_ACTIVATED" %}
+<div class="alert alert-success">
+  <span class="alert-icon">✅</span>
+  <div class="alert-body"><div class="alert-title">Version Activated</div>New vendor version is active. Historical version remains immutable in the database. You can create a new payment intent on the updated recipient.</div>
+</div>
+{% endif %}
+
+{# ── Audit trail ── #}
+<div class="card">
+  <div class="card-title"><span class="icon">📋</span> Case Audit Trail</div>
+  {% if audit %}
+  <div class="timeline">
+    {% for ev in audit %}
+    <div class="timeline-item">
+      <div class="timeline-line">
+        <div class="timeline-dot
+          {% if 'HOLD' in ev.event_type or 'FREEZE' in ev.event_type or 'REJECT' in ev.event_type %}dot-red
+          {% elif 'CONFIRM' in ev.event_type or 'ACTIV' in ev.event_type %}dot-green
+          {% elif 'CHALLENGE' in ev.event_type %}dot-yellow
+          {% else %}dot-blue{% endif %}">
+          {% if 'HOLD' in ev.event_type %}🔒
+          {% elif 'CONFIRM' in ev.event_type %}✅
+          {% elif 'CHALLENGE' in ev.event_type %}✉️
+          {% elif 'ACTIV' in ev.event_type %}🚀
+          {% elif 'REJECT' in ev.event_type %}🚨
+          {% else %}●{% endif %}
+        </div>
+        <div class="timeline-connector"></div>
+      </div>
+      <div class="timeline-body">
+        <div class="timeline-title">{{ ev.event_type }}</div>
+        <div class="timeline-meta">{{ fmt_dt(ev.created_at) }} — {{ ev.state_before or "—" }} → {{ ev.state_after or "—" }}</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="text-dim">No audit events yet.</div>
+  {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Payments — VendorTrust{% endblock %}
+{% block content %}
+<div class="flex-between mb-16">
+  <div>
+    <div class="page-title">💳 Payment Intents</div>
+    <div class="page-sub">Create and manage payment intents. All payouts resolve recipient from immutable approved vendor version.</div>
+  </div>
+</div>
+
+{# ── Create intent form ── #}
+<div style="display:grid;grid-template-columns:1fr 2fr;gap:20px;margin-bottom:20px;">
+  <div class="card">
+    <div class="card-title"><span class="icon">➕</span> New Payment Intent</div>
+    <p style="color:var(--text-dim);font-size:.8rem;margin-bottom:16px;">
+      Created by Requester (Asha). Bound to the current active vendor version at creation time. Must be independently approved by Approver (Ravi) before execution.
+    </p>
+    <form method="post" action="/payments/create">
+      <div class="form-row">
+        <label class="form-label">Invoice Reference</label>
+        <input type="text" name="invoice_reference" class="form-input" placeholder="INV-2026-001" required>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label class="form-label">Amount (cents, e.g. 10000 = $100)</label>
+          <input type="number" name="amount_minor" class="form-input" placeholder="10000" min="1" required>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Currency</label>
+          <select name="currency" class="form-select">
+            <option value="USD">USD</option>
+          </select>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;">Create Intent (Asha) →</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🏢</span> Active Vendor Version</div>
+    {% if active_version %}
+    <div class="diff-col diff-new" style="margin-bottom:0;border:none;padding:0;">
+      <table>
+        <tr><th>Vendor</th><td>{{ vendor.name }}</td></tr>
+        <tr><th>Status</th><td><span class="badge badge-{{ vendor.status.lower() }}">{{ vendor.status }}</span></td></tr>
+        <tr><th>Active Version</th><td>v{{ active_version.version_number }}</td></tr>
+        <tr><th>Payout Recipient</th><td class="td-mono" style="color:var(--success);">{{ active_version.paypal_recipient }}</td></tr>
+        <tr><th>Verified At</th><td>{{ fmt_dt(active_version.created_at) }}</td></tr>
+      </table>
+    </div>
+    <div class="text-xs mt-8">⚠️ Recipient is read-only from the immutable approved version. Invoice cannot override this value.</div>
+    {% else %}
+    <div class="empty-state">No active version</div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Intent list ── #}
+<div class="card">
+  <div class="card-title"><span class="icon">💳</span> All Payment Intents</div>
+  {% if intents %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Invoice Ref</th>
+          <th>Amount</th>
+          <th>Vendor Version</th>
+          <th>State</th>
+          <th>Created</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for i in intents %}
+      <tr>
+        <td><a href="/payments/{{ i.id }}" style="color:var(--accent);">{{ i.invoice_reference }}</a></td>
+        <td>${{ "%.2f"|format(i.amount_minor/100) }} {{ i.currency }}</td>
+        <td class="td-mono">v{{ i.vendor_version_id[:8] }}…</td>
+        <td><span class="badge {{ badge_cls(i.state) }}">{{ i.state }}</span></td>
+        <td class="td-mono">{{ fmt_dt(i.created_at) }}</td>
+        <td><a href="/payments/{{ i.id }}" class="btn btn-outline btn-sm">View →</a></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">💳</div>
+    <div class="empty-text">No payment intents yet.<br>Create one above to begin the approval workflow.</div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
