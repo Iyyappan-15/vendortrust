@@ -24,12 +24,37 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('bound_invoice_reference', sa.String(length=100), nullable=True))
         batch_op.create_unique_constraint('uq_approval_payment_intent', ['payment_intent_id'])
 
+    with op.batch_alter_table('payout_attempts', schema=None) as batch_op:
+        batch_op.create_unique_constraint('uq_payout_attempt_payment_intent', ['payment_intent_id'])
+
     with op.batch_alter_table('vendor_versions', schema=None) as batch_op:
         batch_op.drop_column('superseded_at')
+
+    # SQLite database-level triggers enforcing VendorVersion immutability
+    op.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_prevent_vendor_version_update
+        BEFORE UPDATE ON vendor_versions
+        BEGIN
+            SELECT RAISE(ABORT, 'VendorVersion rows are strictly immutable and cannot be updated.');
+        END;
+    """)
+    op.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_prevent_vendor_version_delete
+        BEFORE DELETE ON vendor_versions
+        BEGIN
+            SELECT RAISE(ABORT, 'VendorVersion rows are strictly immutable and cannot be deleted.');
+        END;
+    """)
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    op.execute("DROP TRIGGER IF EXISTS trg_prevent_vendor_version_delete")
+    op.execute("DROP TRIGGER IF EXISTS trg_prevent_vendor_version_update")
+
+    with op.batch_alter_table('payout_attempts', schema=None) as batch_op:
+        batch_op.drop_constraint('uq_payout_attempt_payment_intent', type_='unique')
+
     with op.batch_alter_table('vendor_versions', schema=None) as batch_op:
         batch_op.add_column(sa.Column('superseded_at', sa.DATETIME(), nullable=True))
 

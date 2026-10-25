@@ -289,6 +289,10 @@ class PayoutAttempt(Base):
     last_provider_check = Column(DateTime(timezone=True), nullable=True)
     provider_response_redacted = Column(Text, nullable=True)
 
+    __table_args__ = (
+        UniqueConstraint("payment_intent_id", name="uq_payout_attempt_payment_intent"),
+    )
+
     payment_intent = relationship("PaymentIntent", back_populates="payout_attempts")
 
     def __repr__(self) -> str:

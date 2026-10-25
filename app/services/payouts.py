@@ -5,6 +5,7 @@ app/services/payouts.py — Strict Payout Submission Interface & Idempotency Con
 import datetime
 import uuid
 from typing import Any, Dict, Optional, Protocol
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.models import Approval, PaymentIntent, PayoutAttempt, Vendor, VendorVersion, utcnow
 from app.services.approvals import compute_approval_digest
@@ -29,6 +30,12 @@ class PayoutProviderProtocol(Protocol):
         amount_minor: int,
         currency: str,
     ) -> Dict[str, Any]:
+        ...
+
+    def get_batch_status(self, payout_batch_id: str) -> Dict[str, Any]:
+        ...
+
+    def get_item_status(self, payout_item_id: str) -> Dict[str, Any]:
         ...
 
 
@@ -77,12 +84,75 @@ class MockPayoutProvider:
             "response_redacted": f"SIMULATED_MOCK_PROVIDER (recipient={recipient_email[:3]}***, amt={amount_minor})",
         }
 
+    def get_batch_status(self, payout_batch_id: str) -> Dict[str, Any]:
+        return {
+            "batch_status": "SUCCESS" if self.desired_item_status == "SUCCESS" else "PROCESSING",
+            "first_item_id": f"item_for_{payout_batch_id}",
+            "first_item_status": self.desired_item_status,
+        }
+
+    def get_item_status(self, payout_item_id: str) -> Dict[str, Any]:
+        return {
+            "transaction_status": self.desired_item_status,
+            "time_processed": utcnow().isoformat(),
+        }
+
 
 def to_naive_utc(dt: datetime.datetime) -> datetime.datetime:
     """Normalize datetime to naive UTC for consistent SQLite comparisons."""
     if dt.tzinfo is not None:
         return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def reconcile_payout_attempt(
+    session: Session,
+    payout_attempt_id: str,
+    provider: PayoutProviderProtocol,
+) -> PayoutAttempt:
+    """
+    Reconciles an in-flight, pending, or uncertain payout attempt against provider records.
+    Never submits a new payout instruction; only checks the existing batch and item.
+    """
+    attempt = session.query(PayoutAttempt).filter_by(id=payout_attempt_id).first()
+    if not attempt:
+        raise ValueError(f"PayoutAttempt '{payout_attempt_id}' not found.")
+
+    intent = session.query(PaymentIntent).filter_by(id=attempt.payment_intent_id).first()
+
+    if attempt.payout_item_id and hasattr(provider, "get_item_status"):
+        item_res = provider.get_item_status(attempt.payout_item_id)
+        tx_status = item_res.get("transaction_status")
+        if tx_status:
+            attempt.last_provider_check = utcnow()
+            if tx_status == "SUCCESS":
+                attempt.state = "SUCCESS"
+                if intent:
+                    intent.state = "SETTLED"
+            elif tx_status in ("PENDING", "PROCESSING", "UNCLAIMED"):
+                attempt.state = "PENDING"
+            elif tx_status in ("FAILED", "RETURNED", "BLOCKED"):
+                attempt.state = "FAILED"
+                if intent:
+                    intent.state = "FAILED"
+            session.commit()
+            return attempt
+
+    if attempt.payout_batch_id and hasattr(provider, "get_batch_status"):
+        batch_res = provider.get_batch_status(attempt.payout_batch_id)
+        b_item_status = batch_res.get("first_item_status")
+        if b_item_status:
+            attempt.last_provider_check = utcnow()
+            if b_item_status == "SUCCESS":
+                attempt.state = "SUCCESS"
+                if intent:
+                    intent.state = "SETTLED"
+            elif b_item_status in ("PENDING", "PROCESSING"):
+                attempt.state = "PENDING"
+            session.commit()
+            return attempt
+
+    return attempt
 
 
 def submit_approved_payout(
@@ -101,8 +171,11 @@ def submit_approved_payout(
     4. Validates approval signature/digest, expiration, and invalidation status.
     5. Checks vendor status (must not be FROZEN).
     6. Ensures version is still the active version of the vendor.
-    7. DURABLE PRE-COMMIT: Persists PayoutAttempt with unique batch/item IDs and
-       COMMITS to the database BEFORE network submission (idempotency key durable).
+    7. DURABLE PRE-COMMIT & CRASH RESILIENCE:
+       - If an attempt was already committed in RESERVED state (e.g. recovery from crash),
+         it reuses the EXACT SAME sender_batch_id and sender_item_id.
+       - Never creates a duplicate attempt. Unique constraint on payment_intent_id enforces this.
+       - Dispatches to provider and updates final item outcome.
     """
     # Step 1: Load payment intent
     intent = session.query(PaymentIntent).filter_by(id=payment_intent_id).first()
@@ -118,14 +191,21 @@ def submit_approved_payout(
         .filter_by(payment_intent_id=intent.id)
         .first()
     )
+
+    attempt: Optional[PayoutAttempt] = None
+
     if existing_attempt:
         if existing_attempt.state == "SUCCESS":
             raise DuplicatePayoutError(f"Payment intent '{intent.id}' has already been successfully paid out.")
-        if existing_attempt.state in ("RESERVED", "SUBMITTED", "PENDING", "PROCESSING"):
+        if existing_attempt.state in ("SUBMITTED", "PENDING", "PROCESSING", "RECONCILE_REQUIRED"):
             # Return existing attempt to enforce idempotency
             return existing_attempt
+        if existing_attempt.state == "RESERVED" and not existing_attempt.payout_batch_id:
+            # Crash recovery immediately after reservation commit:
+            # Reuse the already-committed attempt and its stable sender_batch_id!
+            attempt = existing_attempt
 
-    if intent.state != "APPROVED":
+    if attempt is None and intent.state != "APPROVED":
         raise InvalidStateTransitionError(
             f"Cannot execute payout for intent '{payment_intent_id}': state is '{intent.state}', expected 'APPROVED'."
         )
@@ -194,56 +274,64 @@ def submit_approved_payout(
     if verified_recipient != approval.bound_recipient.lower():
         raise SecurityViolationError("Version recipient does not match approval binding.")
 
-    # Step 6: Persist and COMMIT PayoutAttempt in RESERVED state BEFORE network submission
-    # This guarantees idempotency keys and state are durable on disk before any network packet is dispatched.
-    sender_batch_id = f"vt_batch_{uuid.uuid4().hex[:12]}"
-    sender_item_id = f"vt_item_{uuid.uuid4().hex[:12]}"
-    attempt_id = str(uuid.uuid4())
+    # Step 6: Persist and COMMIT PayoutAttempt in RESERVED state BEFORE network submission (if not recovering)
+    if attempt is None:
+        sender_batch_id = f"vt_batch_{uuid.uuid4().hex[:12]}"
+        sender_item_id = f"vt_item_{uuid.uuid4().hex[:12]}"
+        attempt_id = str(uuid.uuid4())
 
-    attempt = PayoutAttempt(
-        id=attempt_id,
-        payment_intent_id=intent.id,
-        sender_batch_id=sender_batch_id,
-        sender_item_id=sender_item_id,
-        payout_batch_id=None,
-        payout_item_id=None,
-        state="RESERVED",
-        amount_minor=intent.amount_minor,
-        currency=intent.currency,
-        resolved_recipient=verified_recipient,
-        created_at=utcnow(),
-        last_provider_check=utcnow(),
-        provider_response_redacted=None,
-    )
-    session.add(attempt)
-    intent.state = "SUBMISSION_RESERVED"
+        attempt = PayoutAttempt(
+            id=attempt_id,
+            payment_intent_id=intent.id,
+            sender_batch_id=sender_batch_id,
+            sender_item_id=sender_item_id,
+            payout_batch_id=None,
+            payout_item_id=None,
+            state="RESERVED",
+            amount_minor=intent.amount_minor,
+            currency=intent.currency,
+            resolved_recipient=verified_recipient,
+            created_at=utcnow(),
+            last_provider_check=utcnow(),
+            provider_response_redacted=None,
+        )
+        try:
+            session.add(attempt)
+            intent.state = "SUBMISSION_RESERVED"
 
-    record_audit_event(
-        session=session,
-        event_type="PAYOUT_RESERVED",
-        actor_id=operator_actor_id,
-        entity_type="PAYOUT_ATTEMPT",
-        entity_id=attempt_id,
-        state_before="APPROVED",
-        state_after="RESERVED",
-        details={
-            "payment_intent_id": intent.id,
-            "sender_batch_id": sender_batch_id,
-            "sender_item_id": sender_item_id,
-            "resolved_recipient": verified_recipient,
-            "amount_minor": intent.amount_minor,
-            "currency": intent.currency,
-        },
-    )
-    # DURABLE COMMIT BEFORE NETWORK TRANSIT
-    session.commit()
+            record_audit_event(
+                session=session,
+                event_type="PAYOUT_RESERVED",
+                actor_id=operator_actor_id,
+                entity_type="PAYOUT_ATTEMPT",
+                entity_id=attempt_id,
+                state_before="APPROVED",
+                state_after="RESERVED",
+                details={
+                    "payment_intent_id": intent.id,
+                    "sender_batch_id": sender_batch_id,
+                    "sender_item_id": sender_item_id,
+                    "resolved_recipient": verified_recipient,
+                    "amount_minor": intent.amount_minor,
+                    "currency": intent.currency,
+                },
+            )
+            # DURABLE COMMIT BEFORE NETWORK TRANSIT
+            session.commit()
+        except IntegrityError:
+            # Handle concurrent race: another thread committed the reservation a microsecond earlier
+            session.rollback()
+            existing = session.query(PayoutAttempt).filter_by(payment_intent_id=intent.id).first()
+            if existing:
+                return existing
+            raise
 
-    # Step 7: Dispatch to Provider
+    # Step 7: Dispatch to Provider using the committed stable identifiers
     payout_provider = provider or MockPayoutProvider(desired_item_status="SUCCESS")
     try:
         provider_result = payout_provider.execute_payout(
-            sender_batch_id=sender_batch_id,
-            sender_item_id=sender_item_id,
+            sender_batch_id=attempt.sender_batch_id,
+            sender_item_id=attempt.sender_item_id,
             recipient_email=verified_recipient,
             amount_minor=intent.amount_minor,
             currency=intent.currency,
