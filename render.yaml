@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: vendortrust
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: PAYPAL_MODE
+        value: mock
+      - key: SECURE_COOKIES
+        value: "true"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GEMINI_MODEL
+        value: gemini-3-flash-preview
