@@ -22,8 +22,9 @@ Protocol Summary:
 IDEMPOTENCY & RECOVERY INVARIANTS:
 - State is durably recorded in .gate2_state.json.
 - On ordinary reruns, the script defaults to RECONCILIATION of the existing operation.
-- No new payout attempt or payment intent is created if a previous run is recorded.
-- Starting a brand new payout requires explicit '--force-new-test --confirm-operator'.
+- Missing, unreadable, or corrupt state is treated as a recovery problem, NEVER as permission to start a new payout.
+- An existing payout is NEVER declared SUCCESS solely because the JSON state says SUCCESS. Verified database or provider evidence is strictly required.
+- Starting a brand new payout ALWAYS requires explicit '--force-new-test --confirm-operator'.
 """
 
 import argparse
@@ -88,11 +89,14 @@ def mask_email(email: str) -> str:
 
 
 def load_gate2_state(state_file: Path = DEFAULT_STATE_FILE) -> Optional[Dict[str, Any]]:
-    """Load persistent Gate 2 state if present."""
+    """Load persistent Gate 2 state if present and valid."""
     if state_file.exists():
         try:
             with open(state_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict) and data.get("test_run_id") and data.get("status"):
+                    return data
+                print(f"[WARN] Corrupt or incomplete state in {state_file}")
         except Exception as e:
             print(f"[WARN] Failed to read {state_file}: {e}")
     return None
@@ -198,9 +202,12 @@ def reconcile_existing_gate2(
     """
     Reconciles an already-recorded Gate 2 operation without submitting a new payout.
     Never calls submit_approved_payout.
+    Requires matching database or provider evidence to declare SUCCESS.
     """
     attempt_id = state.get("payout_attempt_id")
     intent_id = state.get("payment_intent_id")
+    payout_item_id = state.get("payout_item_id")
+    payout_batch_id = state.get("payout_batch_id")
     current_status = state.get("status", "UNKNOWN")
 
     print("\n[IDEMPOTENCY SAFEGUARD] Found recorded Gate 2 execution state:")
@@ -208,21 +215,23 @@ def reconcile_existing_gate2(
     print(f"  Payment Intent ID: {intent_id}")
     print(f"  Payout Attempt ID: {attempt_id}")
     print(f"  Sender Batch ID:   {state.get('sender_batch_id')}")
-    print(f"  PayPal Batch ID:   {state.get('payout_batch_id')}")
-    print(f"  PayPal Item ID:    {state.get('payout_item_id')}")
+    print(f"  PayPal Batch ID:   {payout_batch_id}")
+    print(f"  PayPal Item ID:    {payout_item_id}")
     print(f"  Recorded State:    {current_status}")
 
     attempt = session.query(PayoutAttempt).filter_by(id=attempt_id).first() if attempt_id else None
     intent = session.query(PaymentIntent).filter_by(id=intent_id).first() if intent_id else None
 
-    if current_status == "SUCCESS" and attempt and attempt.state == "SUCCESS":
-        print("\n[+] Gate 2 has already reached terminal status SUCCESS.")
-        print("[+] Reconciled against database: PaymentIntent is SETTLED.")
+    # 1. Durable Database Verification
+    if attempt and attempt.state == "SUCCESS" and intent and intent.state == "SETTLED":
+        print("\n[+] Verified against durable SQLite database:")
+        print(f"    PayoutAttempt '{attempt.id}' state: SUCCESS")
+        print(f"    PaymentIntent '{intent.id}' state: SETTLED")
         print("[+] Zero additional payouts submitted (script-level idempotency preserved).")
         return True
 
-    # If the attempt was interrupted or is in a non-terminal state, reconcile against provider
-    if attempt_id and adapter:
+    # 2. Reconcile against provider if attempt exists in DB and adapter is supplied
+    if attempt_id and attempt and adapter:
         print("\n[*] Reconciling existing payout attempt against provider records...")
         attempt = reconcile_payout_attempt(session, attempt_id, adapter)
         session.commit()
@@ -243,7 +252,22 @@ def reconcile_existing_gate2(
         print(f"[*] Reconciled Attempt State: {attempt.state}")
         return (attempt.state == "SUCCESS")
 
-    return (current_status == "SUCCESS")
+    # 3. Direct Provider Check if database record is unavailable but item ID & provider exist
+    if payout_item_id and adapter and hasattr(adapter, "get_item_status"):
+        print(f"\n[*] Database record unavailable. Querying provider for item {payout_item_id}...")
+        try:
+            item_res = adapter.get_item_status(payout_item_id)
+            tx_status = item_res.get("transaction_status")
+            if tx_status == "SUCCESS":
+                print(f"[+] Provider verified item status: SUCCESS")
+                return True
+        except Exception as e:
+            print(f"[-] Provider query error: {e}")
+
+    # Fall-through safety invariant:
+    # NEVER declare SUCCESS purely because state JSON says SUCCESS if no matching DB or provider evidence exists!
+    print("\n[-] INSUFFICIENT EVIDENCE: Payout cannot be declared SUCCESS without verified database or provider records.")
+    return False
 
 
 def run_gate2(
@@ -263,11 +287,32 @@ def run_gate2(
     print("VendorTrust — Gate 2: End-to-End Sandbox Verification & Idempotency Safeguard")
     print("=" * 80)
 
-    # Check for existing state
-    existing_state = load_gate2_state(state_file)
+    # 1. Enforce explicit authorization for every new genuine payout
+    # If operator has not explicitly confirmed intent to start a new test:
+    if not (args.force_new_test and args.confirm_operator):
+        # A. Check for unauthorized --force-new-test
+        if args.force_new_test and not args.confirm_operator:
+            print("\n[SAFETY REFUSAL] --force-new-test requires explicit operator authorization via --confirm-operator.")
+            print("This prevents accidental duplicate real PayPal sandbox payouts.")
+            print("To proceed, execute:")
+            print("  python scripts/test_paypal_gate2.py --force-new-test --confirm-operator")
+            if argv is not None:
+                return False
+            sys.exit(2)
 
-    # 1. Idempotency Check: Default to reconciliation if state exists and not forcing new
-    if existing_state and not args.force_new_test:
+        # B. Default path: Must reconcile an existing recorded operation
+        existing_state = load_gate2_state(state_file)
+        if not existing_state:
+            print("\n[SAFETY REFUSAL] No valid Gate 2 state file found at:")
+            print(f"  {state_file}")
+            print("A missing or corrupt state file is treated as a recovery problem, NOT permission to start a new payout.")
+            print("- To reconcile an existing test, restore .gate2_state.json or the database.")
+            print("- To intentionally authorize a brand-new real PayPal sandbox payment, you MUST explicitly provide:")
+            print("    python scripts/test_paypal_gate2.py --force-new-test --confirm-operator")
+            if argv is not None:
+                return False
+            sys.exit(2)
+
         print("[*] Existing Gate 2 state detected. Running in RECONCILIATION mode.")
         print("[*] (Use --force-new-test --confirm-operator only if you intend to create a brand new payout.)")
 
@@ -307,15 +352,7 @@ def run_gate2(
             db.close()
         return result
 
-    # 2. Safety Gate for New Test Runs
-    if args.force_new_test and not args.confirm_operator:
-        print("\n[SAFETY REFUSAL] --force-new-test requires explicit operator authorization via --confirm-operator.")
-        print("This prevents accidental duplicate real PayPal sandbox payouts.")
-        print("To proceed, execute:")
-        print("  python scripts/test_paypal_gate2.py --force-new-test --confirm-operator")
-        sys.exit(2)
-
-    # 3. Validation for New Test Run
+    # 2. Both --force-new-test and --confirm-operator are present: Authorized New Test
     client_id = os.getenv("PAYPAL_CLIENT_ID", "").strip()
     client_secret = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
     vendor_email = os.getenv("PAYPAL_VENDOR_EMAIL", "").strip()
@@ -338,7 +375,7 @@ def run_gate2(
     print(f"\n[+] Initializing New Gate 2 Test Run: {test_run_id}")
     print(f"Target Sandbox Recipient: {mask_email(vendor_email)}")
 
-    # 4. Database Setup
+    # Database Setup
     if db_session:
         db = db_session
         should_close_db = False

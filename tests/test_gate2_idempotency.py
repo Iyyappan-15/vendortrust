@@ -5,8 +5,10 @@ Ensures that:
 1. Normal reruns of Gate 2 reconcile without submitting duplicate payouts.
 2. Interrupted or non-terminal runs resume reconciliation using existing batch/item IDs.
 3. Uncertain provider responses update attempt state without resubmitting payouts.
-4. '--force-new-test' fails closed unless '--confirm-operator' is provided.
-5. Authorized new tests generate unique test run identities and sender batch IDs.
+4. Missing, unreadable, or corrupt state fails closed and NEVER initiates a new payout.
+5. Recorded SUCCESS status in JSON is rejected without matching database or provider evidence.
+6. '--force-new-test' fails closed unless '--confirm-operator' is provided.
+7. Authorized new tests generate unique test run identities and sender batch IDs.
 
 ALL tests execute entirely in-memory with fake/mock providers to guarantee NO real PayPal sandbox funds are touched.
 """
@@ -330,20 +332,95 @@ def test_gate2_uncertain_provider_response_reconciles_cleanly(tmp_path, memory_d
     assert intent.state == "SUBMITTED"
 
 
+def test_gate2_missing_state_file_fails_closed_without_new_payout(tmp_path, memory_db):
+    """Confirm that an absent state file refuses execution and does NOT start a new payout."""
+    non_existent_state = tmp_path / "absent_gate2_state.json"
+    evidence_file = tmp_path / "GATE2_EVIDENCE.md"
+
+    mock_adapter = MockSandboxAdapter(desired_item_status="SUCCESS")
+
+    result = run_gate2(
+        argv=[],
+        db_session=memory_db,
+        adapter=mock_adapter,
+        state_file=non_existent_state,
+        evidence_file=evidence_file,
+    )
+
+    # Must fail closed with False
+    assert result is False
+    # Crucial: zero payouts initiated
+    assert mock_adapter.submit_calls == 0
+
+
+def test_gate2_corrupted_state_file_fails_closed_without_new_payout(tmp_path, memory_db):
+    """Confirm that an invalid/corrupted state file refuses execution and does NOT start a new payout."""
+    corrupt_state = tmp_path / "corrupt_state.json"
+    evidence_file = tmp_path / "GATE2_EVIDENCE.md"
+
+    with open(corrupt_state, "w", encoding="utf-8") as f:
+        f.write("{ invalid json corrupted ")
+
+    mock_adapter = MockSandboxAdapter(desired_item_status="SUCCESS")
+
+    result = run_gate2(
+        argv=[],
+        db_session=memory_db,
+        adapter=mock_adapter,
+        state_file=corrupt_state,
+        evidence_file=evidence_file,
+    )
+
+    assert result is False
+    assert mock_adapter.submit_calls == 0
+
+
+def test_gate2_state_success_without_database_evidence_refuses_success(tmp_path, memory_db):
+    """Confirm that recorded SUCCESS in state JSON is rejected if DB record is missing."""
+    state_file = tmp_path / ".gate2_state.json"
+    evidence_file = tmp_path / "GATE2_EVIDENCE.md"
+
+    # State file claims SUCCESS, but memory_db has NO records!
+    state = {
+        "test_run_id": "test_ghost_run",
+        "payment_intent_id": "ghost_intent",
+        "payout_attempt_id": "ghost_attempt",
+        "sender_batch_id": "vt_batch_ghost",
+        "payout_batch_id": "GHOST_BATCH",
+        "payout_item_id": "GHOST_ITEM",
+        "status": "SUCCESS",
+    }
+    save_gate2_state(state, state_file)
+
+    # Adapter cannot verify item
+    class NonVerifyingAdapter:
+        pass
+
+    result = run_gate2(
+        argv=[],
+        db_session=memory_db,
+        adapter=NonVerifyingAdapter(),
+        state_file=state_file,
+        evidence_file=evidence_file,
+    )
+
+    # Must reject false SUCCESS claim when database evidence is missing
+    assert result is False
+
+
 def test_gate2_force_new_test_requires_confirm_operator(tmp_path, memory_db):
     """Confirm '--force-new-test' fails closed with exit code 2 when '--confirm-operator' is missing."""
     state_file = tmp_path / ".gate2_state.json"
     evidence_file = tmp_path / "GATE2_EVIDENCE.md"
 
-    with pytest.raises(SystemExit) as exc_info:
-        run_gate2(
-            argv=["--force-new-test"],
-            db_session=memory_db,
-            adapter=MockSandboxAdapter(),
-            state_file=state_file,
-            evidence_file=evidence_file,
-        )
-    assert exc_info.value.code == 2
+    result = run_gate2(
+        argv=["--force-new-test"],
+        db_session=memory_db,
+        adapter=MockSandboxAdapter(),
+        state_file=state_file,
+        evidence_file=evidence_file,
+    )
+    assert result is False
 
 
 def test_gate2_authorized_force_new_test_generates_unique_identity(tmp_path, memory_db):
